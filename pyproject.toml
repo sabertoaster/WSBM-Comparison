@@ -9,8 +9,12 @@ dependencies = [
     "netgraph>=4.13.2",
     "networkx>=3.4.2",
     "numpy>=2.2.6",
+    "reservoirpy",
     "scikit-learn>=1.7.2",
 ]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src"]
+
+[tool.uv.sources]
+reservoirpy = { git = "https://github.com/sabertoaster/reservoirpy.git", rev = "wsbm-fix" }
