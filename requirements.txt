@@ -1,0 +1,15 @@
+gymnasium
+joblib
+keras
+matplotlib
+mujoco
+numpy
+optuna
+reservoirpy @ git+https://github.com/sabertoaster/reservoirpy.git@wsbm-fix
+stable-baselines3
+tensorboard
+tensorboard-data-server
+tensorflow
+tqdm
+imageio
+cmaes
