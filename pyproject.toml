@@ -18,6 +18,7 @@ dependencies = [
     "optuna>=4.9.0",
     "reservoirpy",
     "scikit-learn>=1.7.2",
+    "seaborn>=0.13.2",
     "stable-baselines3>=2.9.0",
     "tensorboard>=2.21.0",
     "tensorboard-data-server>=0.7.2",
