@@ -1,4 +1,5 @@
 import sys
+
 sys.modules["tensorflow"] = None
 
 import os
@@ -11,6 +12,7 @@ from stable_baselines3.common.vec_env import DummyVecEnv
 from stable_baselines3.common.monitor import Monitor
 
 from er_mrl.wrappers import ReservoirWrapper
+
 
 def parse_all_selected_csv(csv_path="selected.csv"):
     df = pd.read_csv(csv_path)
@@ -96,7 +98,7 @@ def collect_trajectories(task, configs, dry_run=False):
         vec_env = DummyVecEnv([make_env])
 
         # Monkey patch to extract O_t (reservoir input U) and C_t (reservoir state X)
-        res_env = vec_env.envs[0].env # .env to go inside Monitor
+        res_env = vec_env.envs[0].env  # .env to go inside Monitor
 
         # We'll store trajectories here
         o_t_traj = []
@@ -133,7 +135,9 @@ def collect_trajectories(task, configs, dry_run=False):
         np.save(f"trajectories/{task}_{motif}_{seed}_Ot.npy", np.array(o_t_traj))
         np.save(f"trajectories/{task}_{motif}_{seed}_Ct.npy", np.array(c_t_traj))
 
-        print(f"Saved {len(o_t_traj)} steps to trajectories/{task}_{motif}_{seed}_*.npy")
+        print(
+            f"Saved {len(o_t_traj)} steps to trajectories/{task}_{motif}_{seed}_*.npy"
+        )
 
         # Clean up memory
         del model
@@ -142,6 +146,7 @@ def collect_trajectories(task, configs, dry_run=False):
         if dry_run:
             print("Dry run complete for this task. Exiting early.")
             break
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()

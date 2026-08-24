@@ -14,6 +14,12 @@ except ImportError:
     print("Could not import DSA. Ensure it is accessible in the parent directory.")
     sys.exit(1)
 
+try:
+    from src.utils import choose_rank
+except ImportError:
+    sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+    from src.utils import choose_rank
+
 
 def get_stratum_ticks(df):
     """
@@ -57,13 +63,7 @@ def main():
 
     unique_strata, boundaries, centers = get_stratum_ticks(df)
 
-    # DMD parameters used in previous scripts
-    # N4SID subspace identification requires N_samples > 2*delays*(m + p_out).
-    # Since RL episodes are ~1000 steps, delays=40 leads to empty matrices and 0 distances!
-    # We dynamically select delays=3 and rank=20 to safely fit within the 1000-step constraint.
-    N_DELAYS = 2
-    rank = 10
-    dmd_config = dict(n_delays=N_DELAYS, rank=rank, backend="n4sid")
+    N_DELAYS = 3
 
     tasks = ["Ant-v4", "HalfCheetah-v4", "Swimmer-v4"]
 
@@ -95,6 +95,12 @@ def main():
                 f"Skipping {task} due to {missing} missing files. Run collect_obs_context_vec.py first."
             )
             continue
+
+        print("\nChoosing rank from the data...")
+        rank, _ = choose_rank(Ys, n_delays=N_DELAYS, min_rank=1)
+        print(f"  -> using rank={rank} for all systems")
+
+        dmd_config = dict(n_delays=N_DELAYS, rank=rank, backend="n4sid")
 
         print(f"Fitting InputDSA for {len(Ys)} networks...")
         inputDSA = InputDSA(

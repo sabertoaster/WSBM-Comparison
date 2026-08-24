@@ -16,6 +16,12 @@ except ImportError:
     print("Could not import DSA. Ensure it is accessible in the parent directory.")
     sys.exit(1)
 
+try:
+    from src.utils import choose_rank
+except ImportError:
+    sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+    from src.utils import choose_rank
+
 from reservoirpy.datasets import mackey_glass
 from reservoirpy.nodes.wsbm_esn import (
     AssortativeESN,
@@ -90,33 +96,6 @@ def ou_noise(n_timesteps, dim=10, theta=0.15, seed=0):
         x = x * (1.0 - theta) + np.sqrt(2.0 * theta) * rng.standard_normal(dim)
         out[t] = x
     return (out - out.mean(axis=0)) / out.std(axis=0)
-
-
-def choose_rank(Ys, n_delays, energy=0.99, min_rank=3, max_rank=50):
-    """Pick the DMD rank from the data instead of hard-coding it.
-
-    `rank` truncates the SVD of the delay-embedded state matrix, so it is a claim
-    about how many dynamical modes the system actually has. Hard-coding 20 when
-    the input only excites 2 directions means 18 of the fitted modes are
-    numerical noise, and the Procrustes alignment then spends most of its effort
-    matching that noise.
-
-    Returns the smallest rank at which EVERY system reaches `energy` of its
-    cumulative singular energy. DSA needs one rank for all systems, since
-    Procrustes compares equal-sized matrices, so this takes the max across them.
-
-    This SVDs the Hankel matrix directly rather than reading n4sid's internal
-    projection, so it is an estimate of the rank n4sid would need, not n4sid's
-    own spectrum. It is far closer than a constant.
-    """
-    per_system = []
-    for Y in Ys:
-        H = np.hstack([Y[i : len(Y) - n_delays + i + 1] for i in range(n_delays)])
-        sv = np.linalg.svd(H - H.mean(axis=0), compute_uv=False)
-        cum = np.cumsum(sv**2) / np.sum(sv**2)
-        per_system.append(int(np.searchsorted(cum, energy)) + 1)
-    rank = int(np.clip(max(per_system), min_rank, max_rank))
-    return rank, per_system
 
 
 def build_systems(configs, units=100):
