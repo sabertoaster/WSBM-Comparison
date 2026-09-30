@@ -1,17 +1,19 @@
+"""Standalone reference WSBM ESNs and a ridge readout.
+
+The RL pipeline uses the ReservoirPy fork instead. This reference module remains
+available for structural figures and supervised sequence experiments::
+
+    from src.wsbm_esn import AssortativeESN
+    esn = AssortativeESN(n_reservoir=20, random_state=42)
+    matrix, assignments = esn.W_res, esn.community_assignments
 """
-Echo State Network (ESN) Models Collection
-This module contains the base ESN class and all specialized ESN variants.
-"""
-import numpy as np
-from typing import Tuple, Optional, Dict, List
-from sklearn.linear_model import Ridge
-from sklearn.cluster import KMeans
-from sklearn.metrics import pairwise_distances
-import scipy.cluster.hierarchy as hierarchy
-from scipy.spatial.distance import pdist
-import matplotlib.pyplot as plt
-import random
+
 from abc import ABC, abstractmethod
+from typing import Dict, Optional, Tuple
+
+import matplotlib.pyplot as plt
+import numpy as np
+from sklearn.linear_model import Ridge
 
 # Import utility functions.
 # There is no utils.py in this project, so this import failed and made the
@@ -21,18 +23,22 @@ from abc import ABC, abstractmethod
 # fallback. Drop a real utils.py next to this file and it takes over.
 try:
     from utils import (
-        load_structural_connectome,
-        load_functional_connectome,
         load_connectivity_matrices,
+        load_functional_connectome,
+        load_structural_connectome,
     )
 except ImportError:  # pragma: no cover
+
     def load_structural_connectome(*args, **kwargs):
+        """Return None when optional connectome loaders are unavailable."""
         return None
 
     def load_functional_connectome(*args, **kwargs):
+        """Return None when optional connectome loaders are unavailable."""
         return None
 
     def load_connectivity_matrices(*args, **kwargs):
+        """Return an empty mapping when optional connectome loaders are unavailable."""
         return {}
 
 
@@ -42,12 +48,12 @@ except ImportError:  # pragma: no cover
 class BaseESN(ABC):
     """
     Base class for all Echo State Network implementations.
-    
+
     This abstract class defines the common interface and functionality
     for all ESN variants. Specific implementations should inherit from this
     class and implement the required methods.
     """
-    
+
     def __init__(
         self,
         n_reservoir: int = 68,
@@ -56,11 +62,11 @@ class BaseESN(ABC):
         leak_rate: float = 0.3,
         ridge_regression_alpha: float = 1e-6,
         random_state: Optional[int] = None,
-        input_dim: int = 1
+        input_dim: int = 1,
     ):
         """
         Initialize the base ESN parameters.
-        
+
         Args:
             n_reservoir: Number of reservoir units
             input_scaling: Scaling factor for input weights
@@ -92,10 +98,10 @@ class BaseESN(ABC):
         self.W_res = None  # Reservoir weights
         self.W_out = None  # Output weights
         self.readout = None  # Readout model
-        
+
         # State tracking
         self.state_history = None
-        
+
     @abstractmethod
     def initialize_weights(self):
         """
@@ -103,7 +109,7 @@ class BaseESN(ABC):
         Each ESN variant should implement its own weight initialization.
         """
         pass
-    
+
     def _update_state(self, state: np.ndarray, input_pattern: np.ndarray) -> np.ndarray:
         """
         Update the reservoir state for a single time step.
@@ -126,15 +132,12 @@ class BaseESN(ABC):
         input_contribution = np.dot(self.W_in, np.reshape(input_pattern, (-1, 1))).flatten()
         reservoir_contribution = np.dot(self.W_res, state)
 
-        return (1 - self.leak_rate) * state + self.leak_rate * np.tanh(
-            input_contribution + reservoir_contribution
-        )
-
+        return (1 - self.leak_rate) * state + self.leak_rate * np.tanh(input_contribution + reservoir_contribution)
 
     def train(self, X: np.ndarray, y: np.ndarray, track_states: bool = False):
         """
         Train the ESN using ridge regression.
-        
+
         Args:
             X: Input time series (n_samples, input_dim)
             y: Target time series (n_samples, output_dim)
@@ -143,94 +146,94 @@ class BaseESN(ABC):
         # Ensure X has correct shape
         if X.ndim == 1:
             X = X.reshape(-1, 1)
-            
+
         # Validate input dimension
         if self.input_dim != X.shape[1]:
             self.input_dim = X.shape[1]
             self.initialize_weights()
-            
+
         # Initialize reservoir states
         states = np.zeros((len(X), self.n_reservoir))
         state = np.zeros(self.n_reservoir)
-        
+
         # Run reservoir for input sequence
         for t in range(len(X)):
             state = self._update_state(state, X[t])
             states[t] = state
-            
+
         # Store state history if tracking is enabled
         if track_states:
             self.state_history = states.copy()
-            
+
         # Train readout using ridge regression
         self.readout = Ridge(alpha=self.ridge_regression_alpha)
         self.readout.fit(states, y)
-        
+
         # Store output weights for direct access
         self.W_out = self.readout.coef_
-        
+
         return self
-    
+
     def predict(self, X: np.ndarray, track_states: bool = False) -> np.ndarray:
         """
         Generate predictions using the trained ESN.
-        
+
         Args:
             X: Input time series (n_samples, input_dim)
             track_states: Whether to store state history during prediction
-            
+
         Returns:
             Predicted time series (n_samples, output_dim)
         """
         # Ensure X has correct shape
         if X.ndim == 1:
             X = X.reshape(-1, 1)
-            
+
         # Initialize state and predictions
         state = np.zeros(self.n_reservoir)
         predictions = []
         states = np.zeros((len(X), self.n_reservoir)) if track_states else None
-        
+
         # Run reservoir for input sequence
         for t in range(len(X)):
             state = self._update_state(state, X[t])
             if track_states:
                 states[t] = state
             predictions.append(self.readout.predict(state.reshape(1, -1))[0])
-            
+
         # Store state history if tracking is enabled
         if track_states:
             self.state_history = states
-            
+
         return np.array(predictions)
-    
+
     def get_state_data(self) -> Optional[np.ndarray]:
         """
         Get the recorded state history if available.
-        
+
         Returns:
             State history if tracked, None otherwise
         """
         return self.state_history
-    
+
     def _validate_input(self, X: np.ndarray) -> np.ndarray:
         """
         Validate and format input data.
-        
+
         Args:
             X: Input data
-            
+
         Returns:
             Properly formatted input data
         """
         if X.ndim == 1:
             X = X.reshape(-1, 1)
-            
+
         if X.shape[1] != self.input_dim:
             raise ValueError(f"Input dimension mismatch: expected {self.input_dim}, got {X.shape[1]}")
-            
+
         return X
-    
+
     def reset_state(self):
         """Reset the internal state of the reservoir."""
         self.state_history = None
@@ -238,7 +241,7 @@ class BaseESN(ABC):
     def visualize_structure(self, save_path=None, interactive=False):
         """
         Visualize the network structure.
-        
+
         Parameters:
         -----------
         save_path : str
@@ -248,39 +251,39 @@ class BaseESN(ABC):
         """
         if interactive:
             try:
-                import plotly.graph_objects as go
                 import networkx as nx
-                
+                import plotly.graph_objects as go
+
                 # Create a directed graph
                 G = nx.DiGraph()
-                
+
                 # Add reservoir neurons
                 for i in range(self.n_reservoir):
                     G.add_node(f"res_{i}", type="reservoir")
-                
+
                 # Add input nodes
                 for i in range(self.input_dim):
                     G.add_node(f"in_{i}", type="input")
-                    
+
                 # Add input connections
                 for i in range(self.n_reservoir):
                     for j in range(self.input_dim):
                         if self.W_in is not None and np.abs(self.W_in[i, j]) > 0.01:  # threshold
                             G.add_edge(f"in_{j}", f"res_{i}", weight=self.W_in[i, j])
-                
+
                 # Add reservoir connections
                 for i in range(self.n_reservoir):
                     for j in range(self.n_reservoir):
                         if self.W_res is not None and np.abs(self.W_res[i, j]) > 0.01:  # threshold
                             G.add_edge(f"res_{i}", f"res_{j}", weight=self.W_res[i, j])
-                
+
                 # Create positions
                 pos = nx.spring_layout(G, seed=42)
-                
+
                 # Create separate traces for input-to-reservoir and reservoir-to-reservoir edges
-                input_edges = [(u, v) for u, v in G.edges() if 'in_' in u]
-                res_edges = [(u, v) for u, v in G.edges() if 'res_' in u]
-                
+                input_edges = [(u, v) for u, v in G.edges() if "in_" in u]
+                res_edges = [(u, v) for u, v in G.edges() if "res_" in u]
+
                 # Input to reservoir edge trace
                 input_edge_x = []
                 input_edge_y = []
@@ -289,12 +292,15 @@ class BaseESN(ABC):
                     x1, y1 = pos[edge[1]]
                     input_edge_x.extend([x0, x1, None])
                     input_edge_y.extend([y0, y1, None])
-                
+
                 input_edge_trace = go.Scatter(
-                    x=input_edge_x, y=input_edge_y, 
-                    line=dict(width=0.5, color='rgba(50, 150, 50, 0.5)'),
-                    hoverinfo='none', mode='lines')
-                
+                    x=input_edge_x,
+                    y=input_edge_y,
+                    line=dict(width=0.5, color="rgba(50, 150, 50, 0.5)"),
+                    hoverinfo="none",
+                    mode="lines",
+                )
+
                 # Reservoir to reservoir edge trace
                 res_edge_x = []
                 res_edge_y = []
@@ -303,107 +309,120 @@ class BaseESN(ABC):
                     x1, y1 = pos[edge[1]]
                     res_edge_x.extend([x0, x1, None])
                     res_edge_y.extend([y0, y1, None])
-                
+
                 res_edge_trace = go.Scatter(
-                    x=res_edge_x, y=res_edge_y, 
-                    line=dict(width=0.5, color='rgba(150, 50, 50, 0.5)'),
-                    hoverinfo='none', mode='lines')
-                
+                    x=res_edge_x,
+                    y=res_edge_y,
+                    line=dict(width=0.5, color="rgba(150, 50, 50, 0.5)"),
+                    hoverinfo="none",
+                    mode="lines",
+                )
+
                 # Create node traces
                 input_nodes_x = []
                 input_nodes_y = []
                 res_nodes_x = []
                 res_nodes_y = []
-                
+
                 for node in G.nodes():
                     x, y = pos[node]
-                    if 'in_' in node:
+                    if "in_" in node:
                         input_nodes_x.append(x)
                         input_nodes_y.append(y)
                     else:
                         res_nodes_x.append(x)
                         res_nodes_y.append(y)
-                
+
                 input_node_trace = go.Scatter(
-                    x=input_nodes_x, y=input_nodes_y, mode='markers',
-                    marker=dict(size=8, color='blue'),
-                    hoverinfo='text', text=[f"Input {i}" for i in range(len(input_nodes_x))])
-                
+                    x=input_nodes_x,
+                    y=input_nodes_y,
+                    mode="markers",
+                    marker=dict(size=8, color="blue"),
+                    hoverinfo="text",
+                    text=[f"Input {i}" for i in range(len(input_nodes_x))],
+                )
+
                 res_node_trace = go.Scatter(
-                    x=res_nodes_x, y=res_nodes_y, mode='markers',
-                    marker=dict(size=10, color='red'),
-                    hoverinfo='text', text=[f"Reservoir {i}" for i in range(len(res_nodes_x))])
-                
+                    x=res_nodes_x,
+                    y=res_nodes_y,
+                    mode="markers",
+                    marker=dict(size=10, color="red"),
+                    hoverinfo="text",
+                    text=[f"Reservoir {i}" for i in range(len(res_nodes_x))],
+                )
+
                 # Create figure
                 data = [input_edge_trace, res_edge_trace, input_node_trace, res_node_trace]
-                fig = go.Figure(data=data,
-                             layout=go.Layout(
-                                title='ESN Network Structure',
-                                showlegend=False,
-                                hovermode='closest',
-                                margin=dict(b=20, l=5, r=5, t=40),
-                                xaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
-                                yaxis=dict(showgrid=False, zeroline=False, showticklabels=False))
-                              )
-                
+                fig = go.Figure(
+                    data=data,
+                    layout=go.Layout(
+                        title="ESN Network Structure",
+                        showlegend=False,
+                        hovermode="closest",
+                        margin=dict(b=20, l=5, r=5, t=40),
+                        xaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
+                        yaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
+                    ),
+                )
+
                 if save_path:
                     fig.write_html(save_path)
                 else:
                     fig.show()
-                
+
                 return G
-            
+
             except ImportError as e:
                 print(f"Interactive visualization requires plotly and networkx: {e}")
                 print("Falling back to static visualization")
                 interactive = False
-                
+
         # Static visualization
         if not interactive:
             plt.figure(figsize=(10, 8))
-            
+
             # Create adjacency matrix for visualization
             adjacency = np.zeros((self.input_dim + self.n_reservoir, self.input_dim + self.n_reservoir))
-            
+
             # Input to reservoir connections
             if self.W_in is not None:
                 for i in range(self.n_reservoir):
                     for j in range(self.input_dim):
                         adjacency[j, self.input_dim + i] = np.abs(self.W_in[i, j])
-            
+
             # Reservoir connections
             if self.W_res is not None:
                 for i in range(self.n_reservoir):
                     for j in range(self.n_reservoir):
                         adjacency[self.input_dim + i, self.input_dim + j] = np.abs(self.W_res[i, j])
-            
-            plt.imshow(adjacency, cmap='viridis')
-            plt.colorbar(label='Connection Strength')
-            
+
+            plt.imshow(adjacency, cmap="viridis")
+            plt.colorbar(label="Connection Strength")
+
             # Add labels
-            plt.axhline(y=self.input_dim-0.5, color='white', linestyle='-', alpha=0.3)
-            plt.axvline(x=self.input_dim-0.5, color='white', linestyle='-', alpha=0.3)
-            
+            plt.axhline(y=self.input_dim - 0.5, color="white", linestyle="-", alpha=0.3)
+            plt.axvline(x=self.input_dim - 0.5, color="white", linestyle="-", alpha=0.3)
+
             plt.title("ESN Connectivity")
             plt.xlabel("To")
             plt.ylabel("From")
-            
+
             labels = [f"In {i}" for i in range(self.input_dim)] + [f"Res {i}" for i in range(self.n_reservoir)]
             plt.xticks(range(len(labels)), labels, rotation=90)
             plt.yticks(range(len(labels)), labels)
-            
+
             plt.tight_layout()
-            
+
             if save_path:
                 plt.savefig(save_path)
                 plt.close()
             else:
                 plt.show()
-    
+
     def visualize_activations(self, X, save_path=None, interactive=False):
         """
         Visualize reservoir activations for a given input sequence.
-        
+
         Parameters:
         -----------
         X : array
@@ -416,72 +435,75 @@ class BaseESN(ABC):
         # Ensure X has correct shape
         if X.ndim == 1:
             X = X.reshape(-1, 1)
-            
+
         # Get activations
         state = np.zeros(self.n_reservoir)
         states = []
-        
+
         # Process at most 100 time steps to keep visualization manageable
         for t in range(min(100, len(X))):
             state = self._update_state(state, X[t])
             states.append(np.abs(state))
-        
+
         states = np.array(states)
-        
+
         if interactive:
             try:
                 import plotly.graph_objects as go
-                
-                fig = go.Figure(data=go.Heatmap(
-                    z=states,
-                    x=[f'Neuron {i}' for i in range(self.n_reservoir)],
-                    y=[f'Time {t}' for t in range(states.shape[0])],
-                    colorscale='Viridis'))
-                
+
+                fig = go.Figure(
+                    data=go.Heatmap(
+                        z=states,
+                        x=[f"Neuron {i}" for i in range(self.n_reservoir)],
+                        y=[f"Time {t}" for t in range(states.shape[0])],
+                        colorscale="Viridis",
+                    )
+                )
+
                 fig.update_layout(
-                    title='Reservoir Neuron Activations',
-                    xaxis_title='Reservoir Neurons',
-                    yaxis_title='Time Steps')
-                
+                    title="Reservoir Neuron Activations", xaxis_title="Reservoir Neurons", yaxis_title="Time Steps"
+                )
+
                 if save_path:
                     fig.write_html(save_path)
                 else:
                     fig.show()
-                
+
             except ImportError as e:
                 print(f"Interactive visualization requires plotly: {e}")
                 print("Falling back to static visualization")
                 interactive = False
-        
+
         if not interactive:
             plt.figure(figsize=(14, 8))
-            
+
             # Heatmap of activations
             plt.subplot(2, 1, 1)
-            plt.imshow(states, aspect='auto', cmap='viridis')
-            plt.colorbar(label='Activation')
-            plt.xlabel('Reservoir Neurons')
-            plt.ylabel('Time Steps')
-            plt.title('Reservoir Neuron Activations')
-            
+            plt.imshow(states, aspect="auto", cmap="viridis")
+            plt.colorbar(label="Activation")
+            plt.xlabel("Reservoir Neurons")
+            plt.ylabel("Time Steps")
+            plt.title("Reservoir Neuron Activations")
+
             # Line plot of selected neurons
             plt.subplot(2, 1, 2)
             selected_neurons = min(5, self.n_reservoir)
             for i in range(selected_neurons):
-                plt.plot(states[:, i], label=f'Neuron {i}')
-            
-            plt.xlabel('Time Steps')
-            plt.ylabel('Activation')
-            plt.title(f'Activation of {selected_neurons} Selected Neurons')
+                plt.plot(states[:, i], label=f"Neuron {i}")
+
+            plt.xlabel("Time Steps")
+            plt.ylabel("Activation")
+            plt.title(f"Activation of {selected_neurons} Selected Neurons")
             plt.legend()
-            
+
             plt.tight_layout()
-            
+
             if save_path:
                 plt.savefig(save_path)
                 plt.close()
             else:
                 plt.show()
+
 
 #######################
 # WSBM-based ESN Models
@@ -527,11 +549,7 @@ def classify_motif(w_rr: float, w_ss: float, w_rs: float, tol: float = 1e-12) ->
 def classify_omega(omega: np.ndarray) -> Dict[Tuple[int, int], str]:
     """Motif class of every community pair r < s."""
     K = len(omega)
-    return {
-        (r, s): classify_motif(omega[r, r], omega[s, s], omega[r, s])
-        for r in range(K)
-        for s in range(r + 1, K)
-    }
+    return {(r, s): classify_motif(omega[r, r], omega[s, s], omega[r, s]) for r in range(K) for s in range(r + 1, K)}
 
 
 def build_omega(
@@ -619,8 +637,7 @@ def equal_sizes(n_reservoir: int, n_communities: int) -> np.ndarray:
     )
 
 
-def dirichlet_sizes(n_reservoir: int, n_communities: int, alpha: float,
-                    rng: np.random.Generator) -> np.ndarray:
+def dirichlet_sizes(n_reservoir: int, n_communities: int, alpha: float, rng: np.random.Generator) -> np.ndarray:
     """Node -> community assignment with UNEQUAL block sizes.
 
     Sizes are drawn from Dirichlet(alpha, ..., alpha): small alpha (~1) gives
@@ -735,13 +752,10 @@ class WSBMESN(BaseESN):
         elif size_alpha is None:
             self.community_assignments = equal_sizes(n_reservoir, n_communities)
         else:
-            self.community_assignments = dirichlet_sizes(
-                n_reservoir, n_communities, size_alpha, self.rng
-            )
+            self.community_assignments = dirichlet_sizes(n_reservoir, n_communities, size_alpha, self.rng)
         if len(self.community_assignments) != n_reservoir:
             raise ValueError(
-                f"assignments has length {len(self.community_assignments)}, "
-                f"expected n_reservoir={n_reservoir}"
+                f"assignments has length {len(self.community_assignments)}, expected n_reservoir={n_reservoir}"
             )
         self.n_communities = int(self.community_assignments.max()) + 1
 
@@ -769,11 +783,11 @@ class WSBMESN(BaseESN):
         if not np.allclose(m, m.T):
             raise ValueError(f"{name} must be symmetric")
         if (lo is not None and m.min() < lo) or (hi is not None and m.max() > hi):
-            raise ValueError(f"{name} must lie in [{lo}, {hi}], got "
-                             f"[{m.min():.3g}, {m.max():.3g}]")
+            raise ValueError(f"{name} must lie in [{lo}, {hi}], got [{m.min():.3g}, {m.max():.3g}]")
         return m
 
     def initialize_weights(self):
+        """Sample input and recurrent weights, then scale the recurrent spectral radius."""
         rng, N = self.rng, self.n_reservoir
         self.W_in = rng.standard_normal((N, self.input_dim)) * self.input_scaling
 
@@ -792,8 +806,10 @@ class WSBMESN(BaseESN):
             # Averaging two independent draws instead would halve the variance
             # and break the sigma_rs parameterisation.
             up = np.triu(np.ones((N, N), dtype=bool), 1)
-            W = np.where(up, W, 0.0); W = W + W.T
-            mask = mask & up; mask = mask | mask.T
+            W = np.where(up, W, 0.0)
+            W = W + W.T
+            mask = mask & up
+            mask = mask | mask.T
 
         W *= mask
         np.fill_diagonal(W, 0.0)
@@ -802,7 +818,8 @@ class WSBMESN(BaseESN):
         if self.p_negative > 0:
             flip = rng.random((N, N)) < self.p_negative
             if self.symmetric:
-                flip = np.triu(flip, 1); flip = flip | flip.T
+                flip = np.triu(flip, 1)
+                flip = flip | flip.T
             W[flip] = -np.abs(W[flip])
 
         radius = np.abs(np.linalg.eigvals(W)).max()
@@ -842,30 +859,29 @@ class WSBMESN(BaseESN):
     def realised_density(self) -> np.ndarray:
         """Edge density actually present in W_res -- the empirical connectivity."""
         z, K = self.community_assignments, self.n_communities
-        return np.array(
-            [[(self.W_res[np.ix_(z == r, z == s)] != 0).mean() for s in range(K)]
-             for r in range(K)]
-        )
+        return np.array([[(self.W_res[np.ix_(z == r, z == s)] != 0).mean() for s in range(K)] for r in range(K)])
 
     def motifs(self) -> Dict[Tuple[int, int], str]:
         """Motif class of every community pair, per the paper's rule."""
         return classify_omega(self.omega)
 
     def get_community_data(self) -> Dict:
+        """Return planted assignments, block matrices, and motif classifications."""
         return {
-            'community_assignments': self.community_assignments,
-            'omega': self.omega,
-            'connectivity': self.connectivity,
-            'motifs': self.motifs(),
-            'density_motifs': classify_omega(self.connectivity),
+            "community_assignments": self.community_assignments,
+            "omega": self.omega,
+            "connectivity": self.connectivity,
+            "motifs": self.motifs(),
+            "density_motifs": classify_omega(self.connectivity),
         }
 
     def get_node_metadata(self) -> Dict:
         # "core" = the community with the largest within-block mean
+        """Return community assignments and a boolean mask identifying core nodes."""
         core = int(np.argmax(np.diag(self.omega)))
         return {
-            'community_assignments': self.community_assignments,
-            'is_core': self.community_assignments == core,
+            "community_assignments": self.community_assignments,
+            "is_core": self.community_assignments == core,
         }
 
 
@@ -885,9 +901,7 @@ def DisassortativeESN(n_communities=4, mu_in=0.1, mu_out=0.9, **kw):
     return WSBMESN(motif="disassortative", n_communities=n_communities, hi=mu_out, lo=mu_in, **kw)
 
 
-def CorePeripheryESN(
-    n_reservoir=68, n_communities=2, core_fraction=0.2, mu_cc=0.9, mu_cp=0.5, mu_pp=0.1, **kw
-):
+def CorePeripheryESN(n_reservoir=68, n_communities=2, core_fraction=0.2, mu_cc=0.9, mu_cp=0.5, mu_pp=0.1, **kw):
     """WSBMESN with community 0 as a dense core; needs mu_cc > mu_cp > mu_pp."""
     n_core = max(1, int(round(n_reservoir * core_fraction)))
     periphery = equal_sizes(n_reservoir - n_core, max(1, n_communities - 1)) + 1

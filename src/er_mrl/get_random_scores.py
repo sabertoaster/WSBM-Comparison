@@ -1,55 +1,28 @@
-import numpy as np
-import gymnasium as gym 
-from stable_baselines3 import PPO
+"""Evaluate seeded random-action agents without running anything on import.
+
+Example: python -m src.er_mrl.get_random_scores --protocol legacy --tasks Swimmer-v4 --evaluation-episodes 10
+Writes per-episode returns and legacy mean-step rewards inside an isolated run.
+"""
+
+import sys
+from pathlib import Path
+
+if __package__ in {None, ""}:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
+from src.cli import main as run_workflow
+from src.config import build_parser as workflow_parser
 
 
-env_ids = ['Ant-v4',
-           'HalfCheetah-v4',
-           'Hopper-v4',
-           'Humanoid-v4',
-           'HumanoidStandup-v4',
-           'InvertedDoublePendulum-v4',
-           'InvertedPendulum-v4',
-           'Pusher-v4',
-           'Reacher-v4',
-           'Swimmer-v4',
-           'Walker2d-v4'
-           ]
-
-env_scores = []
-
-logs_name = "logs_random_agents.txt"
-
-for env_id in env_ids:
-    # Evaluating Random_agent
-
-    env = gym.make(env_id)
-    nb_episodes = 100
-    mean_ep_rewards = []
-
-    for ep in range(nb_episodes):
-        ep_rewards = []
-        done = False
-        truncated = False
-        obs, info = env.reset() 
-
-        while not done and not truncated:
-            action = env.action_space.sample()
-            obs, reward, done, truncated, info = env.step(action)
-            ep_rewards.append(reward)
-
-        # end of ep:
-        mean_ep_reward = np.mean(ep_rewards)
-        mean_ep_rewards.append(mean_ep_reward)
-    
-    env_mean_reward = np.mean(mean_ep_rewards)
-    env_scores.append(env_mean_reward)
-
-with open(logs_name, "w") as f:    
-    for i in range(len(env_ids)):
-        print(f"env: {env_ids[i]} score: {env_scores[i]}\n")
-        f.writelines(f"\nenv: {env_ids[i]} score: {env_scores[i]}")
+def build_parser():
+    """Build the random-policy evaluation parser."""
+    return workflow_parser("random_scores")
 
 
-    
+def main(argv=None):
+    """Evaluate random policies using the requested task and seed settings."""
+    return run_workflow("random_scores", argv)
 
+
+if __name__ == "__main__":
+    main()

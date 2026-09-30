@@ -1,10 +1,14 @@
-import numpy as np
-import matplotlib.pyplot as plt
-import gymnasium as gym
-import reservoirpy as rpy
+"""Gymnasium context encoders adapted from ER-MRL.
 
+ReservoirWrapper defaults to legacy behavior for existing checkpoints. Corrected
+experiments explicitly select action encoding, episode resets, and saved W.
+"""
+
+import gymnasium as gym
+import numpy as np
 from gymnasium import spaces
-from reservoirpy.nodes import Reservoir, AssortativeESN, WSBMESN
+from reservoirpy.mat_gen import normal
+from reservoirpy.nodes import WSBMESN, Reservoir
 
 
 class ReservoirWrapper(gym.Wrapper):
@@ -22,28 +26,86 @@ class ReservoirWrapper(gym.Wrapper):
     :param lr (float) : The leak-rate of the Reservoir neurons
     :param sr (float) : The spectral radius of the Reservoir
     :param iss (float) : The input scaling of the Reservoir
-    :param reset (bool) : Reset the Reservoir at each env reset or not
+    :param reset_res (bool) : Reset reservoir state at each episode boundary.
     :param skip_c (bool) : Do askip connection of the current (o, a, r) with the Reservoir context
     :param seed (int) : The random seed of the Reservoir
+    :param protocol (str): "legacy" preserves zero action inputs; "corrected"
+        encodes the executed action. Corrected factories enable reset_res.
+    :param recurrent_matrix (np.ndarray or None): Optional fixed (units, units)
+        recurrent weights, reused without another WSBM draw.
+
+    ``last_input`` stores the concatenated observation, action, and reward;
+    ``last_context`` stores the context before any optional skip connection.
     """
 
-    def __init__(self, env, units, lr, sr, iss, reset_res=False, skip_c=False, seed=42, 
-                 motif="assortative", n_communities=4, hi=0.9, lo=0.1, mid=0.5, 
-                 sigma=0.1, connectivity=0.1, symmetric=True, p_negative=0.0, **kwargs):
+    def __init__(
+        self,
+        env,
+        units,
+        lr,
+        sr,
+        iss,
+        reset_res=False,
+        skip_c=False,
+        seed=42,
+        motif="assortative",
+        n_communities=4,
+        hi=0.9,
+        lo=0.1,
+        mid=0.5,
+        sigma=0.1,
+        connectivity=0.1,
+        symmetric=True,
+        p_negative=0.0,
+        protocol="legacy",
+        recurrent_matrix=None,
+        **kwargs,
+    ):
+        """Initialize the wrapper and its declared observation space from the supplied environment and settings."""
         super(ReservoirWrapper, self).__init__(env)
 
         self.env = env
         self.reset_res = reset_res
         self.skip_c = skip_c
+        if protocol not in {"legacy", "corrected"}:
+            raise ValueError("Unknown reservoir protocol")
+        self.protocol = protocol
+        self.last_input = None
+        self.last_context = None
         # if action_space is Discrete we need to one hot encode it to pass it to the Reservoir
         self.discrete_a_space = isinstance(env.action_space, gym.spaces.Discrete)
         # Creation of a Reservoir with the given parameters
         actual_motif = "assortative" if motif == "null" else motif
-        self.reservoir = WSBMESN(
-            units=units, lr=lr, sr=sr, input_scaling=iss, seed=seed,
-            motif=actual_motif, n_communities=n_communities, hi=hi, lo=lo, mid=mid,
-            sigma=sigma, connectivity=connectivity, symmetric=symmetric, 
-            p_negative=p_negative, **kwargs
+        self.reservoir = (
+            Reservoir(
+                units=units,
+                lr=lr,
+                sr=sr,
+                input_scaling=iss,
+                seed=seed,
+                Win=normal,
+                input_connectivity=1.0,
+                W=np.asarray(recurrent_matrix).copy(),
+                **kwargs,
+            )
+            if recurrent_matrix is not None
+            else WSBMESN(
+                units=units,
+                lr=lr,
+                sr=sr,
+                input_scaling=iss,
+                seed=seed,
+                motif=actual_motif,
+                n_communities=n_communities,
+                hi=hi,
+                lo=lo,
+                mid=mid,
+                sigma=sigma,
+                connectivity=connectivity,
+                symmetric=symmetric,
+                p_negative=p_negative,
+                **kwargs,
+            )
         )
         # Modifying the observation space to match the Reservoir neurons shape and dtype
         if self.skip_c:
@@ -57,12 +119,8 @@ class ReservoirWrapper(gym.Wrapper):
                 old_obs_space_features = env.observation_space.shape[0]
                 old_act_space_features = env.action_space.shape[0]
 
-                min_obs = np.min(
-                    (min(env.observation_space.low), min(env.action_space.low))
-                )
-                max_obs = np.max(
-                    (max(env.observation_space.high), max(env.action_space.high))
-                )
+                min_obs = np.min((min(env.observation_space.low), min(env.action_space.low)))
+                max_obs = np.max((max(env.observation_space.high), max(env.action_space.high)))
             self.observation_space = spaces.Box(
                 low=min_obs,
                 high=max_obs,
@@ -70,9 +128,7 @@ class ReservoirWrapper(gym.Wrapper):
                 dtype=np.float64,
             )
         else:
-            self.observation_space = spaces.Box(
-                low=-1, high=1, shape=(units,), dtype=np.float64
-            )
+            self.observation_space = spaces.Box(low=-1, high=1, shape=(units,), dtype=np.float64)
 
     def reset(self, seed=None, options=None):
         """
@@ -86,7 +142,7 @@ class ReservoirWrapper(gym.Wrapper):
         :return: (np.array, dict)
         """
         # Reseting the Reservoir
-        if self.reset_res:
+        if self.reset_res and self.reservoir.initialized:
             self.reservoir.reset()
 
         # Getting the variables of self.env.reset
@@ -96,7 +152,7 @@ class ReservoirWrapper(gym.Wrapper):
 
         # Action encoding
         action = (
-            self.one_hot_encode(0)
+            (np.zeros((1, self.env.action_space.n)) if self.protocol == "corrected" else self.one_hot_encode(0))
             if self.discrete_a_space
             else np.zeros(self.env.action_space.shape).reshape(1, -1)
         )
@@ -104,10 +160,12 @@ class ReservoirWrapper(gym.Wrapper):
         # Feeding the Reservoir with this data
         reservoir_input = np.concatenate((obs, action, reward), axis=1)
         context = self.reservoir(np.squeeze(reservoir_input))
+        self.last_input = reservoir_input.flatten().copy()
+        self.last_context = context.flatten().copy()
 
         # Add skip connection with (obs, action, reward)
         if self.skip_c:
-            context = np.concatenate((context, obs, action, reward), axis=1)
+            context = np.concatenate((context.reshape(1, -1), obs, action, reward), axis=1)
 
         return context.flatten(), info
 
@@ -127,18 +185,24 @@ class ReservoirWrapper(gym.Wrapper):
 
         # Action encoding
         action = (
-            self.one_hot_encode(0)
+            self.one_hot_encode(action if self.protocol == "corrected" else 0)
             if self.discrete_a_space
-            else np.zeros(self.env.action_space.shape).reshape(1, -1)
+            else (
+                np.asarray(action).reshape(1, -1)
+                if self.protocol == "corrected"
+                else np.zeros(self.env.action_space.shape).reshape(1, -1)
+            )
         )
 
         # Feeding the Reservoir
         reservoir_input = np.concatenate((obs, action, reward_obs), axis=1)
         context = self.reservoir(np.squeeze(reservoir_input))
+        self.last_input = reservoir_input.flatten().copy()
+        self.last_context = context.flatten().copy()
 
         # Add skip connection with (obs, action, reward)
         if self.skip_c:
-            context = np.concatenate((context, obs, action, reward_obs), axis=1)
+            context = np.concatenate((context.reshape(1, -1), obs, action, reward_obs), axis=1)
 
         return context.flatten(), reward, done, truncated, info
 
@@ -161,6 +225,7 @@ class MultiReservoirWrapper(gym.Wrapper):
     """
 
     def __init__(self, env, nb_res, reset_res=False, seed=42, **kwargs):
+        """Initialize the wrapper and its declared observation space from the supplied environment and settings."""
         super(MultiReservoirWrapper, self).__init__(env)
 
         self.env = env
@@ -171,7 +236,7 @@ class MultiReservoirWrapper(gym.Wrapper):
         # creation of Reservoirs with the given parameters
         self.reservoirs = []
         parameters = ["units", "iss", "sr", "lr"]
-        
+
         opt_params = {
             "motif": "assortative",
             "n_communities": 4,
@@ -181,32 +246,26 @@ class MultiReservoirWrapper(gym.Wrapper):
             "sigma": 0.1,
             "connectivity": 0.1,
             "symmetric": True,
-            "p_negative": 0.0
+            "p_negative": 0.0,
         }
-        
+
         for res_id in range(nb_res):
-            units, iss, sr, lr = [kwargs[f"{param}_{res_id+1}"] for param in parameters]
-            
-            res_opt = {param: kwargs.get(f"{param}_{res_id+1}", default) 
-                       for param, default in opt_params.items()}
-            
+            units, iss, sr, lr = [kwargs[f"{param}_{res_id + 1}"] for param in parameters]
+
+            res_opt = {param: kwargs.get(f"{param}_{res_id + 1}", default) for param, default in opt_params.items()}
+
             if res_opt["motif"] == "null":
                 res_opt["motif"] = "assortative"
-            
-            reservoir = WSBMESN(
-                units=units, lr=lr, sr=sr, input_scaling=iss, seed=seed + res_id, **res_opt
-            )
+
+            reservoir = WSBMESN(units=units, lr=lr, sr=sr, input_scaling=iss, seed=seed + res_id, **res_opt)
             self.reservoirs.append(reservoir)
         # Modifying the observation space to match the Reservoir neurons shape and dtype
-        total_units = np.sum(
-            [kwargs[f"units_{res_idx+1}"] for res_idx in range(self.nb_res)]
-        )
-        self.observation_space = spaces.Box(
-            low=-1, high=1, shape=(total_units,), dtype=np.float64
-        )
+        total_units = np.sum([kwargs[f"units_{res_idx + 1}"] for res_idx in range(self.nb_res)])
+        self.observation_space = spaces.Box(low=-1, high=1, shape=(total_units,), dtype=np.float64)
 
     def reset(self, seed=None, options=None):
         # Reseting the Reservoir
+        """Reset the wrapped environment with the optional seed and return its observation and info."""
         if self.reset_res:
             for reservoir in self.reservoirs:
                 try:
@@ -219,46 +278,34 @@ class MultiReservoirWrapper(gym.Wrapper):
         reward = np.zeros(1).reshape(1, -1)
 
         action = (
-            self.one_hot_encode(0)
-            if self.discrete_a_space
-            else np.zeros(self.env.action_space.shape).reshape(1, -1)
+            self.one_hot_encode(0) if self.discrete_a_space else np.zeros(self.env.action_space.shape).reshape(1, -1)
         )
 
         reservoir_input = np.hstack((obs, action, reward))
-        context = np.array(
-            [
-                self.reservoirs[res_idx](reservoir_input)
-                for res_idx in range(self.nb_res)
-            ]
-        ).reshape(1, -1)
+        context = np.array([self.reservoirs[res_idx](reservoir_input) for res_idx in range(self.nb_res)]).reshape(1, -1)
 
         return context.flatten(), info
 
     def step(self, action):
         # Getting the data from self.env.step
+        """Advance the wrapped environment and return observation, reward, termination, truncation, and info."""
         obs, reward, done, truncated, info = self.env.step(action)
         obs = obs.reshape(1, -1)
         reward_obs = np.array(reward).reshape(1, -1)
 
         # Action encoding
         action = (
-            self.one_hot_encode(0)
-            if self.discrete_a_space
-            else np.zeros(self.env.action_space.shape).reshape(1, -1)
+            self.one_hot_encode(0) if self.discrete_a_space else np.zeros(self.env.action_space.shape).reshape(1, -1)
         )
 
         # Feeding the Reservoir
         reservoir_input = np.hstack((obs, action, reward_obs))
-        context = np.array(
-            [
-                self.reservoirs[res_idx](reservoir_input)
-                for res_idx in range(self.nb_res)
-            ]
-        ).reshape(1, -1)
+        context = np.array([self.reservoirs[res_idx](reservoir_input) for res_idx in range(self.nb_res)]).reshape(1, -1)
 
         return context.flatten(), reward, done, truncated, info
 
     def one_hot_encode(self, action):
+        """Return a one-row vector encoding the supplied discrete action index."""
         one_hot_vector = np.zeros(self.env.action_space.n).reshape(1, -1)
         one_hot_vector[0, action] = 1
 
@@ -274,6 +321,7 @@ class RewardsSavingWrapper(gym.Wrapper):
     """
 
     def __init__(self, env):
+        """Initialize the wrapper and its declared observation space from the supplied environment and settings."""
         super(RewardsSavingWrapper, self).__init__(env)
 
         self.env = env
@@ -282,6 +330,7 @@ class RewardsSavingWrapper(gym.Wrapper):
 
     def reset(self, seed=None, options=None):
         # if ep_reward non null
+        """Reset the wrapped environment with the optional seed and return its observation and info."""
         if self.ep_reward:
             self.ep_rewards_list.append(np.sum(self.ep_reward))
 
@@ -293,6 +342,7 @@ class RewardsSavingWrapper(gym.Wrapper):
 
     def step(self, action):
         # do a normal step in the env and add the reward to the ep_reward
+        """Advance the wrapped environment and return observation, reward, termination, truncation, and info."""
         context, reward, done, truncated, info = self.env.step(action)
         self.ep_reward.append(reward)
 
@@ -315,9 +365,28 @@ class POReservoirWrapper(gym.Wrapper):
     Implements a partially observable wrapper where an agent's policy network has only access to the 'obs_units' neurons in a reservoir of 'units' neurons.
     """
 
-    def __init__(self, env, units, obs_units, lr, sr, iss, reset_res=False, seed=42,
-                 motif="assortative", n_communities=4, hi=0.9, lo=0.1, mid=0.5, 
-                 sigma=0.1, connectivity=0.1, symmetric=True, p_negative=0.0, **kwargs):
+    def __init__(
+        self,
+        env,
+        units,
+        obs_units,
+        lr,
+        sr,
+        iss,
+        reset_res=False,
+        seed=42,
+        motif="assortative",
+        n_communities=4,
+        hi=0.9,
+        lo=0.1,
+        mid=0.5,
+        sigma=0.1,
+        connectivity=0.1,
+        symmetric=True,
+        p_negative=0.0,
+        **kwargs,
+    ):
+        """Initialize the wrapper and its declared observation space from the supplied environment and settings."""
         super(POReservoirWrapper, self).__init__(env)
 
         self.env = env
@@ -328,18 +397,28 @@ class POReservoirWrapper(gym.Wrapper):
         # Creation of a Reservoir with the given parameters
         actual_motif = "assortative" if motif == "null" else motif
         self.reservoir = WSBMESN(
-            units=units, lr=lr, sr=sr, input_scaling=iss, seed=seed,
-            motif=actual_motif, n_communities=n_communities, hi=hi, lo=lo, mid=mid,
-            sigma=sigma, connectivity=connectivity, symmetric=symmetric, 
-            p_negative=p_negative, **kwargs
+            units=units,
+            lr=lr,
+            sr=sr,
+            input_scaling=iss,
+            seed=seed,
+            motif=actual_motif,
+            n_communities=n_communities,
+            hi=hi,
+            lo=lo,
+            mid=mid,
+            sigma=sigma,
+            connectivity=connectivity,
+            symmetric=symmetric,
+            p_negative=p_negative,
+            **kwargs,
         )
         # Modifying the observation space to match the Reservoir neurons shape and dtype
-        self.observation_space = spaces.Box(
-            low=-1, high=1, shape=(obs_units,), dtype=np.float64
-        )
+        self.observation_space = spaces.Box(low=-1, high=1, shape=(obs_units,), dtype=np.float64)
 
     def reset(self, seed=None, options=None):
         # Reseting the Reservoir
+        """Reset the wrapped environment with the optional seed and return its observation and info."""
         if self.reset_res:
             self.reservoir.reset()
 
@@ -350,9 +429,7 @@ class POReservoirWrapper(gym.Wrapper):
 
         # Action encoding
         action = (
-            self.one_hot_encode(0)
-            if self.discrete_a_space
-            else np.zeros(self.env.action_space.shape).reshape(1, -1)
+            self.one_hot_encode(0) if self.discrete_a_space else np.zeros(self.env.action_space.shape).reshape(1, -1)
         )
 
         # Feeding the Reservoir with this data
@@ -365,15 +442,14 @@ class POReservoirWrapper(gym.Wrapper):
 
     def step(self, action):
         # Getting the data from self.env.step
+        """Advance the wrapped environment and return observation, reward, termination, truncation, and info."""
         obs, reward, done, truncated, info = self.env.step(action)
         obs = obs.reshape(1, -1)
         reward_obs = np.array(reward).reshape(-1, 1)
 
         # Action encoding
         action = (
-            self.one_hot_encode(0)
-            if self.discrete_a_space
-            else np.zeros(self.env.action_space.shape).reshape(1, -1)
+            self.one_hot_encode(0) if self.discrete_a_space else np.zeros(self.env.action_space.shape).reshape(1, -1)
         )
 
         # Feeding the Reservoir
@@ -384,6 +460,7 @@ class POReservoirWrapper(gym.Wrapper):
         return context, reward, done, truncated, info
 
     def one_hot_encode(self, action):
+        """Return a one-row vector encoding the supplied discrete action index."""
         one_hot_vector = np.zeros(self.env.action_space.n).reshape(1, -1)
         one_hot_vector[0, action] = 1
 
@@ -401,6 +478,11 @@ class DeletedVelocityWrapper(gym.ObservationWrapper):
 
     # Supported envs
     velocity_indices = {
+        "Hopper-v4": np.arange(5, 11),
+        "Walker2d-v4": np.arange(8, 17),
+        "Swimmer-v4": np.arange(3, 8),
+        "HalfCheetah-v4": np.arange(8, 17),
+        "Ant-v4": np.arange(13, 27),
         "CartPole-v1": np.array([1, 3]),
         "MountainCar-v0": np.array([1]),
         "MountainCarContinuous-v0": np.array([1]),
@@ -410,12 +492,15 @@ class DeletedVelocityWrapper(gym.ObservationWrapper):
     }
 
     def __init__(self, env: gym.Env):
+        """Initialize the wrapper and its declared observation space from the supplied environment and settings."""
         super().__init__(env)
 
         env_id: str = env.unwrapped.spec.id
         try:
             # Delete velocity observations
             obs_shape = env.observation_space.shape[0]
+            if np.any(self.velocity_indices[env_id] >= obs_shape):
+                raise ValueError(f"Observation layout incompatible with velocity mask for {env_id}")
             obs_indices = np.ones(obs_shape, dtype=bool)
             obs_indices[self.velocity_indices[env_id]] = False
 
@@ -423,22 +508,23 @@ class DeletedVelocityWrapper(gym.ObservationWrapper):
                 low=env.observation_space.low[obs_indices],
                 high=env.observation_space.high[obs_indices],
                 shape=(np.sum(obs_indices),),
-                dtype=np.float32,
+                dtype=env.observation_space.dtype,
             )
 
             self.observation_mask = obs_indices
         except KeyError as e:
-            raise NotImplementedError(
-                f"Velocity masking not implemented for {env_id}"
-            ) from e
+            raise NotImplementedError(f"Velocity masking not implemented for {env_id}") from e
 
     def observation(self, observation: np.ndarray) -> np.ndarray:
+        """Return the observation with configured velocity indices removed."""
         return observation[self.observation_mask]
 
 
 class CollectObs_Wrapper(gym.Wrapper):
+    """Collect observations, actions, and episode-end flags during environment steps."""
 
     def __init__(self, env):
+        """Initialize the wrapper and its declared observation space from the supplied environment and settings."""
         super(CollectObs_Wrapper, self).__init__(env)
 
         self.env = env
@@ -448,10 +534,12 @@ class CollectObs_Wrapper(gym.Wrapper):
         self.truncated_history = []
 
     def reset(self, seed=None, options=None):
+        """Reset the wrapped environment with the optional seed and return its observation and info."""
         obs, info = self.env.reset(seed=seed, options=options)
         return obs, info
 
     def step(self, action):
+        """Advance the wrapped environment and return observation, reward, termination, truncation, and info."""
         obs, reward, done, truncated, info = self.env.step(action)
         self.observations_history.append(obs)
         self.actions_history.append(action)
@@ -461,18 +549,22 @@ class CollectObs_Wrapper(gym.Wrapper):
 
 
 class CollectContext_Wrapper(gym.Wrapper):
+    """Collect context-encoder observations during environment steps."""
 
     def __init__(self, env):
+        """Initialize the wrapper and its declared observation space from the supplied environment and settings."""
         super(CollectContext_Wrapper, self).__init__(env)
 
         self.env = env
         self.contexts_history = []
 
     def reset(self, seed=None, options=None):
+        """Reset the wrapped environment with the optional seed and return its observation and info."""
         obs, info = self.env.reset(seed=seed, options=options)
         return obs, info
 
     def step(self, action):
+        """Advance the wrapped environment and return observation, reward, termination, truncation, and info."""
         obs, reward, done, truncated, info = self.env.step(action)
         self.contexts_history.append(obs)
         return obs, reward, done, truncated, info

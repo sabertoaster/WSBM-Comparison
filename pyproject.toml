@@ -1,7 +1,11 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
 [project]
 name = "wsbm-comparison"
 version = "0.1.0"
-description = "Add your description here"
+description = "Reproducible WSBM reservoir, PPO, and InputDSA experiments"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
@@ -16,6 +20,10 @@ dependencies = [
     "netgraph>=4.13.2",
     "networkx>=3.4.2",
     "numpy>=2.2.6",
+    "pandas>=2.2",
+    "scipy>=1.15",
+    "torch>=2.0",
+    "dsa-metric",
     "optuna>=4.9.0",
     "reservoirpy",
     "scikit-learn>=1.7.2",
@@ -28,7 +36,27 @@ dependencies = [
 ]
 
 [tool.hatch.build.targets.wheel]
-packages = ["src"]
+packages = ["src", "scripts", "er_mrl"]
 
 [tool.uv.sources]
 reservoirpy = { git = "https://github.com/sabertoaster/reservoirpy.git", rev = "wsbm-fix" }
+dsa-metric = { path = "DSA", editable = true }
+
+[project.scripts]
+wsbm = "src.cli:entrypoint"
+
+[dependency-groups]
+dev = ["pytest>=8", "ruff>=0.11"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+markers = ["integration: small numerical/environment integration checks"]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 120
+extend-exclude = ["DSA"]
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I"]

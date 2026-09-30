@@ -1,10 +1,10 @@
-"""Train selected reservoir configurations and matched PPO baselines.
+"""Evaluate fixed trained policies on common seeded deterministic episodes.
 
 Example (from repository root)::
 
-    python scripts/train_all_selected.py --protocol corrected --selected-csv artifacts/corrected/selection/selection/selected.csv --run-id training
+    python scripts/evaluate.py --protocol corrected --selected-csv artifacts/corrected/selection/selection/selected.csv --models-csv artifacts/corrected/training/models/models.csv
 
-Reads a selection CSV and corrected matrices. Writes model registry, configurations, TensorBoard logs, and learning curves.
+Reads selection and a model registry. Writes per-episode returns and per-policy summaries.
 All new outputs are isolated under artifacts/<protocol>/<run-id>/.
 Use --help for parameters; --dry-run validates without writing or running.
 """
@@ -21,12 +21,12 @@ from src.config import build_parser as workflow_parser
 
 def build_parser():
     """Return the documented argparse interface for this workflow."""
-    return workflow_parser("train_all_selected")
+    return workflow_parser("evaluate")
 
 
 def main(argv=None):
     """Run the workflow with optional explicit command-line arguments."""
-    return run_workflow("train_all_selected", argv)
+    return run_workflow("evaluate", argv)
 
 
 if __name__ == "__main__":

@@ -5,7 +5,7 @@ matplotlib
 mujoco
 numpy
 optuna
-reservoirpy @ git+https://github.com/sabertoaster/reservoirpy.git@wsbm-fix
+reservoirpy @ git+https://github.com/sabertoaster/reservoirpy.git@eae1746f50bd5a798bb964471f273dbb03260ad1
 stable-baselines3
 tensorboard
 tensorboard-data-server
@@ -13,3 +13,13 @@ tensorflow
 tqdm
 imageio
 cmaes
+pandas
+scipy
+torch
+igraph
+netgraph
+networkx
+scikit-learn
+seaborn
+-e ./DSA
+-e .
