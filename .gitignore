@@ -10,3 +10,5 @@ wheels/
 .venv
 /rl_only
 /trajectories
+/artifacts
+/paper

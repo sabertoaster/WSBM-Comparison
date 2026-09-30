@@ -1,3 +1,4 @@
+import argparse
 import os
 import sys
 import numpy as np
@@ -61,8 +62,24 @@ def get_models_metadata(results_list, df_full, task, group_name):
     return models
 
 
-def main():
-    TASK = "Swimmer-v4"
+TASKS = ["HalfCheetah-v4", "Ant-v4", "Swimmer-v4", "Hopper-v4", "Walker2d-v4"]
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(
+        description="Run InputDSA on the top and bottom 10 models for each task."
+    )
+    parser.add_argument(
+        "tasks",
+        metavar="TASK",
+        nargs="*",
+        default=TASKS,
+        help=f"Tasks to analyze (default: all five tasks). Choices: {', '.join(TASKS)}",
+    )
+    args = parser.parse_args(argv)
+    for task in args.tasks:
+        if task not in TASKS:
+            parser.error(f"invalid task {task!r}; choose from {', '.join(TASKS)}")
 
     # 1. Load the 100 selected reservoirs
     if not os.path.exists("selected.csv") and os.path.exists("selection/selected.csv"):
@@ -73,6 +90,11 @@ def main():
     df_full = pd.read_csv(csv_path)
     df_full["stratum"] = df_full["stratum"].fillna("null")
 
+    for task in args.tasks:
+        run_task(task, df_full)
+
+
+def run_task(TASK, df_full):
     # 2. Get performance rankings
     print(f"Calculating performance rankings for {TASK}...")
     results = get_performance(TASK, window_steps=10000, weight_type="linear")
@@ -152,7 +174,7 @@ def main():
     print(f"  -> using rank={rank} for all systems")
 
     print("\nFitting InputDSA...")
-    dmd_config = dict(n_delays=n_delays, rank=rank, backend="dmdc")
+    dmd_config = dict(n_delays=n_delays, rank=rank, backend="n4sid")
 
     inputDSA = InputDSA(
         X=Ys,
