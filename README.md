@@ -108,6 +108,15 @@ Original script names remain supported. Their historical H1/H2 suffixes are expl
 
 ## Outputs and project layout
 
+The new [reservoir activity workflow](docs/WORKFLOWS.md#reservoir-activity-pca-and-cebra) plots PCA in 3D and two 2D projections, plus three separate CEBRA embeddings supervised by observations, executed actions, and rewards. It supports top/bottom K individual agents and separate or shared fits:
+
+```sh
+uv run --locked python scripts/plot_context_embeddings.py \
+  --protocol legacy --group top --k 1 --run-id context-top1
+```
+
+This defaults to all five tasks and evaluates all discovered checkpoints when no saved episode returns are supplied. Add `--tasks Swimmer-v4 --limit 2 --smoke` for a small execution check; `--embedding-mode shared` pools selected agents within each task. Corrected model-registry and saved-data examples are in the workflow reference.
+
 New runs write `artifacts/PROTOCOL/RUN_ID/manifest.json` and the relevant subdirectories:
 
 | Directory | Contents |

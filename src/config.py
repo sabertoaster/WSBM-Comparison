@@ -12,6 +12,7 @@ WORKFLOWS = {
     "train_and_plot": "Train the first reservoir per stratum with policy replicates.",
     "collect_obs_context_vec": "Evaluate checkpoints and collect episode-separated reservoir trajectories.",
     "evaluate": "Evaluate trained policies on seeded deterministic episodes.",
+    "plot_context_embeddings": "Rank agents and plot reservoir activity with PCA and three CEBRA signals.",
     "inputdsa_100_reservoirs_H1": "Plot structural distance versus dynamical state distance (historical H1 filename).",
     "inputdsa_top_bottom_10_reservoirs_H1": "Plot structural/dynamical distances for top and bottom groups.",
     "inputdsa_100_reservoirs_H2": "Plot five InputDSA matrices (historical H2 filename; not paper H2).",
@@ -25,7 +26,7 @@ WORKFLOWS = {
     "random_scores": "Evaluate random-action policies without training.",
 }
 TRAINING = {"train_rl", "train_all_selected", "train_and_plot"}
-EVALUATION = {"evaluate", "collect_obs_context_vec"}
+EVALUATION = {"evaluate", "collect_obs_context_vec", "plot_context_embeddings"}
 SYNTHETIC = {"inputdsa_5_systems_mackey_glass_ou", "inputdsa_100_reservoirs_mackey_glass_ou"}
 DSA_WORKFLOWS = SYNTHETIC | {
     "inputdsa_100_reservoirs_H1",
@@ -279,6 +280,17 @@ def build_parser(workflow):
         parser.add_argument("--evaluation-seed", type=int, default=10000)
     if workflow in TRAINING | EVALUATION | {"random_scores"}:
         parser.add_argument("--max-episode-steps", type=positive, help="Explicit Gym time limit; saved in model config")
+    if workflow == "plot_context_embeddings":
+        parser.add_argument("--evaluation-csv", help="Saved deterministic per-episode returns with run manifest")
+        parser.add_argument("--trajectories-csv", help="Saved episode trajectory registry")
+        parser.add_argument("--group", choices=("top", "bottom", "both"), default="top")
+        parser.add_argument("--k", type=positive, default=1)
+        parser.add_argument("--embedding-mode", choices=("separate", "shared"), default="separate")
+        parser.add_argument("--analysis-seed", type=int, default=0)
+        parser.add_argument("--cebra-iterations", type=positive, default=10000)
+        parser.add_argument("--cebra-batch-size", type=positive, default=512)
+        parser.add_argument("--cebra-learning-rate", type=finite_float, default=3e-4)
+        parser.add_argument("--cebra-delta", type=finite_float, default=0.1)
     if workflow in DSA_WORKFLOWS:
         parser.add_argument("--backend", choices=("dmdc", "n4sid"))
         parser.add_argument("--n-delays", type=positive, default=10 if workflow in SYNTHETIC else 3)
@@ -418,6 +430,8 @@ def parse_args(workflow, argv=None):
         args.tasks = args.task_names
     if getattr(args, "env_id", None):
         args.tasks = [args.env_id]
+    if workflow == "plot_context_embeddings" and not any(t.startswith("--tasks") for t in arguments) and not args.env_id:
+        args.tasks = list(TASKS)
     if (
         workflow == "train_rl"
         and not getattr(args, "env_id", None)
@@ -473,7 +487,9 @@ def parse_args(workflow, argv=None):
         args.pool_per_stratum = args.pool_count
     if args.smoke:
         args.limit, args.policy_seeds, args.evaluation_episodes = args.limit or 4, [0], 1
-        args.training_steps, args.n_steps, args.batch_size, args.n_epochs = 64, 32, 16, 1
+        if workflow != "plot_context_embeddings":
+            args.training_steps = 64
+        args.n_steps, args.batch_size, args.n_epochs = 32, 16, 1
         args.max_episode_steps = args.max_episode_steps or 100
         args.tasks = [args.tasks[0]]
         args.permutations, args.state_iters, args.max_rank = 19, 10, min(args.max_rank, 3)
@@ -483,8 +499,12 @@ def parse_args(workflow, argv=None):
             args.units, args.communities = 20, [2, 3]
             args.pool_per_stratum, args.select_per_stratum = 5, 1
             args.density_range, args.topology_range = [0.15, 0.25], [0.5, 2]
+        if workflow == "plot_context_embeddings":
+            args.cebra_iterations, args.cebra_batch_size = 10, 32
     if not 0 < args.res_lr <= 1 or not 0 < args.res_sr < 1 or args.res_iss <= 0:
         parser.error("require 0 < leak rate <= 1, 0 < spectral radius < 1, and positive input scaling")
+    if workflow == "plot_context_embeddings" and (args.cebra_learning_rate <= 0 or args.cebra_delta <= 0):
+        parser.error("CEBRA learning rate and delta must be positive")
     if not 0 < args.rank_energy <= 1 or args.min_rank > args.max_rank or args.dmd_regularization < 0:
         parser.error("invalid rank energy/bounds or negative DMD regularization")
     if args.learning_rate <= 0 or args.batch_size > args.n_steps * args.n_envs or args.n_steps * args.n_envs < 2:

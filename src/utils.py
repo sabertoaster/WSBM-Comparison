@@ -122,6 +122,7 @@ def create_run(args, workflow):
         "tensorboard",
         "tensorflow",
         "matplotlib",
+        "cebra",
     ):
         try:
             versions[package] = importlib.metadata.version(package)

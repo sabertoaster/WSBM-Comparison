@@ -23,6 +23,58 @@ Smoke selection uses five strata, five candidates per stratum, one pick per stra
 
 Historical underscore spellings remain accepted for existing training flags, such as `--env_id`, `--training_steps`, `--res_lr`, and `--use_reservoir True`. Boolean options also support `--flag`, `--flag False`, and `--no-flag`.
 
+## Reservoir activity PCA and CEBRA
+
+`plot_context_embeddings.py` is a new analysis entrypoint supporting both legacy and corrected checkpoints. It defaults to all five paper tasks, top K=1 individual agents, ten deterministic episodes seeded from 10000, and separate fits per agent. Rankings average episode returns for each `(task, csv_idx, policy_seed)`; PPO baselines are excluded. If no evaluation table is supplied, all discovered agents are evaluated first. `--limit N` narrows the candidate configurations and therefore changes the ranking population.
+
+Install the locked dependencies with `uv sync`. CEBRA is a published PyPI dependency added with `uv add cebra`; `setuptools<81` supplies the `pkg_resources` API required by CEBRA 0.4.0, and `scikit-learn<1.8` retains the validation API it uses. The existing scikit-learn 1.7.2 installation is retained. The local `cebra/` checkout is not used.
+
+For the existing five-task legacy checkpoints:
+
+```sh
+uv run python scripts/plot_context_embeddings.py --protocol legacy \
+  --group top --k 1 --run-id context-top1
+```
+
+For corrected models and previously collected trajectories:
+
+```sh
+uv run python scripts/plot_context_embeddings.py --protocol corrected \
+  --selected-csv artifacts/corrected/selection/selection/selected.csv \
+  --models-csv artifacts/corrected/training/models/models.csv \
+  --evaluation-csv artifacts/corrected/collection/evaluation/episodes.csv \
+  --trajectories-csv artifacts/corrected/collection/trajectories/trajectories.csv \
+  --group both --k 2 --run-id context-top-bottom2
+```
+
+Use the original evaluation seed, episode count, and legacy encoder settings when supplying caches. Missing agents are evaluated; selected agents with missing trajectory labels are recollected. A one-episode smoke cache requires `--evaluation-episodes 1`. Caches require a completed originating manifest with matching protocol and selection; new caches also verify checkpoint and encoder fingerprints. Historical files lacking fingerprints rely on registry/manifest identity checks. The new run's `evaluation/episodes.csv` and `trajectories/trajectories.csv` can be supplied to a later run to reuse evaluation and extraction work.
+
+`--group bottom` chooses the lowest returns. `--group both` produces disjoint top/bottom groups. `--embedding-mode shared` pools selected agents within each task and requires matching neuron and label dimensions. Pooling assumes reservoir neuron coordinates can be treated as corresponding features, although different reservoirs have no guaranteed neuron correspondence. Separate mode fits each agent independently; independently fitted axes are not aligned across agents.
+
+Activity is the reservoir context alone, excluding skip-connection input features. Each post-update context is paired with the resulting environment observation (with its training-time observation mask), executed action, and transition reward. Reset samples are excluded; the last transition's context is included. Old corrected NPZs are adapted with `states[1:]` and `inputs[:-1]`. Legacy input action columns contain zeros, so old legacy trajectories require recollection to obtain actual actions; the reservoir's trained legacy behavior is retained.
+
+PCA centers raw neuron activity without variance scaling. Each task gets a figure with PC1/PC2/PC3 in 3D and PC1/PC2 plus PC1/PC3 in 2D, with variance percentages on the axes. Separate mode places each selected agent on its own row. Three further figures show CEBRA embeddings using observations, actions, and per-step rewards as separate contrastive signals. CEBRA axes are embedding coordinates, not principal components. All plots use step reward as color; shared plots also identify agents with markers and legends.
+
+CEBRA uses `offset1-model`, three output dimensions, cosine distance, and behavior-only sampling. Continuous labels are standardized and use `conditional="delta"` with `--cebra-delta 0.1`; discrete actions use categorical labels. This avoids temporal neighborhoods across concatenated episode boundaries. Defaults are `--cebra-iterations 10000`, `--cebra-batch-size 512`, `--cebra-learning-rate 0.0003`, `--analysis-seed 0`, and `--device cpu`. Constant signals are recorded as skipped. Inspect saved loss curves before interpreting an embedding; short smoke fits validate execution rather than convergence.
+
+Outputs include task PNGs and loss curves in `figures/`; rankings, selected agents, and numerical embedding NPZs in `analysis/`; aligned activity NPZs and an episode registry in `trajectories/`; and fitted PCA/CEBRA models and label scalers in `models/`. The manifest and provenance JSON record settings, source hashes, package versions, and checkpoint configurations. Reload a trusted CEBRA 0.4.0 artifact on recent PyTorch versions with `cebra.CEBRA.load(path, weights_only=False)`.
+
+Small checks:
+
+```sh
+uv run python scripts/plot_context_embeddings.py --protocol legacy \
+  --tasks Swimmer-v4 --limit 2 --smoke --run-id legacy-context-smoke
+
+uv run python scripts/plot_context_embeddings.py --protocol corrected \
+  --selected-csv artifacts/corrected/smoke-selection/selection/selected.csv \
+  --models-csv artifacts/corrected/smoke-training/models/models.csv \
+  --evaluation-csv artifacts/corrected/smoke-collection/evaluation/episodes.csv \
+  --trajectories-csv artifacts/corrected/smoke-collection/trajectories/trajectories.csv \
+  --tasks Swimmer-v4 --smoke --run-id corrected-context-smoke
+```
+
+This workflow's `--smoke` preserves the checkpoint discovery training-step suffix, selects one task and up to four configurations, evaluates one episode, and fits CEBRA for ten iterations with batch size 32. Historical checkpoint settings without JSON configs must be supplied accurately through the legacy encoder options. No RL policies are retrained.
+
 ## Structural selection
 
 `select_reservoirs.py` implements sample → describe → standardize → PCA → stratified MaxMin selection. It never reads training rewards or DSA distances.

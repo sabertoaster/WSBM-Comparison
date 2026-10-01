@@ -26,13 +26,15 @@ dependencies = [
     "dsa-metric",
     "optuna>=4.9.0",
     "reservoirpy",
-    "scikit-learn>=1.7.2",
+    "scikit-learn>=1.7.2,<1.8",
     "seaborn>=0.13.2",
     "stable-baselines3>=2.9.0",
     "tensorboard>=2.21.0",
     "tensorboard-data-server>=0.7.2",
     "tensorflow>=2.21.0",
     "tqdm>=4.70.0",
+    "cebra>=0.4.0",
+    "setuptools<81",
 ]
 
 [tool.hatch.build.targets.wheel]

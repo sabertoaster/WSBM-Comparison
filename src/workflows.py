@@ -323,6 +323,10 @@ def dispatch(args, frame, output, workflow):
 
     if workflow == "select_reservoirs":
         return select(args, output)
+    if workflow == "plot_context_embeddings":
+        from src.context_embeddings import run_embeddings
+
+        return run_embeddings(args, frame, output)
     if workflow in TRAINING:
         from src.figures import plot_training
         from src.training import train_batch

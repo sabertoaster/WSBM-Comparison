@@ -59,6 +59,10 @@ def main(workflow, argv=None):
                     raise ValueError("Descriptor pool and selection must use the same neuron count")
                 if "matrix_hash" not in pool or not frame.matrix_hash.isin(pool.matrix_hash).all():
                     raise ValueError("Descriptor pool does not contain the selected reservoir matrices")
+    if workflow == "plot_context_embeddings":
+        from src.context_embeddings import validate_sources
+
+        validate_sources(args, frame)
     if args.dry_run:
         print(
             json.dumps(

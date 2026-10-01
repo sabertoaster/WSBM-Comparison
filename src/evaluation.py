@@ -4,11 +4,32 @@ Corrected records contain the state before each transition and the input used
 for that transition. Terminal states are saved separately to retain alignment.
 """
 
+import hashlib
+import json
+
 import numpy as np
 import pandas as pd
 
 from src.training import make_environment, registry_environment
 from src.utils import configure_tensorboard, file_hash, matrix_hash
+
+
+def encoder_fingerprint(config):
+    """Fingerprint the encoder settings that determine rollout activity."""
+    keys = (
+        "protocol",
+        "units",
+        "res_lr",
+        "res_sr",
+        "res_iss",
+        "del_obs",
+        "skip_c",
+        "reset_res",
+        "reservoir_seed",
+        "max_episode_steps",
+    )
+    values = {key: config.get(key) for key in keys}
+    return hashlib.sha256(json.dumps(values, sort_keys=True).encode()).hexdigest()
 
 
 def rollout(model, env, seed, collect=False):
@@ -18,16 +39,22 @@ def rollout(model, env, seed, collect=False):
     """
     observation, _ = env.reset(seed=seed)
     states, inputs, post_states = [], [], []
+    observations, actions, rewards = [], [], []
     wrapper = env.env
     total, length = 0.0, 0
     while True:
         previous = wrapper.last_context.copy() if collect else None
         action, _ = model.predict(observation, deterministic=True)
+        executed_action = np.asarray(action).copy()
         observation, reward, terminated, truncated, _ = env.step(action)
         if collect:
             states.append(previous)
             inputs.append(wrapper.last_input.copy())
             post_states.append(wrapper.last_context.copy())
+            observation_dim = int(np.prod(wrapper.env.observation_space.shape))
+            observations.append(wrapper.last_input[:observation_dim].copy())
+            actions.append(executed_action)
+            rewards.append(float(reward))
         total += float(reward)
         length += 1
         if terminated or truncated:
@@ -40,6 +67,9 @@ def rollout(model, env, seed, collect=False):
         "states": np.asarray(states),
         "inputs": np.asarray(inputs),
         "post_states": np.asarray(post_states),
+        "observations": np.asarray(observations),
+        "actions": np.asarray(actions),
+        "rewards": np.asarray(rewards),
         "terminal_state": wrapper.last_context.copy() if collect else np.array([]),
     }
 
@@ -51,10 +81,14 @@ def evaluate_registry(args, frame, registry, output, collect=False):
 
     records, trajectories = [], []
     for _, model_record in registry.iterrows():
+        print(
+            f"Evaluating {model_record.task} idx {model_record.csv_idx} policy {model_record.policy_seed}", flush=True
+        )
         config, row = registry_environment(model_record, args, frame)
         baseline = model_record.stratum == "PPO"
         env = make_environment(model_record.task, config, row, args.selected_csv, baseline, args.evaluation_seed)
         try:
+            model_digest = file_hash(model_record.model_path)
             model = PPO.load(model_record.model_path, env=env, device=args.device)
             if not baseline:
                 realized_hash = matrix_hash(env.env.reservoir.W)
@@ -78,6 +112,8 @@ def evaluate_registry(args, frame, registry, output, collect=False):
                     "evaluation_seed": seed,
                     "protocol": args.protocol,
                     "selection_sha256": file_hash(args.selected_csv),
+                    "model_sha256": model_digest,
+                    "encoder_sha256": encoder_fingerprint(config),
                 }
                 records.append(
                     {**common, **{key: result[key] for key in ("return", "length", "terminated", "truncated")}}
@@ -95,10 +131,26 @@ def evaluate_registry(args, frame, registry, output, collect=False):
                         target,
                         states=states,
                         inputs=inputs,
+                        schema_version=2,
+                        contexts=result["post_states"],
+                        observations=result["observations"],
+                        actions=result["actions"],
+                        rewards=result["rewards"],
+                        timesteps=np.arange(result["length"]),
+                        action_type="discrete" if env.env.discrete_a_space else "continuous",
+                        matrix_hash=realized_hash,
+                        readin_hash=matrix_hash(env.env.reservoir.Win),
                         protocol=args.protocol,
                         **{key: value for key, value in common.items() if key != "protocol"},
                     )
-                    trajectories.append({**common, "path": str(target.resolve()), "matrix_hash": realized_hash})
+                    trajectories.append(
+                        {
+                            **common,
+                            "path": str(target.resolve()),
+                            "matrix_hash": realized_hash,
+                            "readin_hash": matrix_hash(env.env.reservoir.Win),
+                        }
+                    )
                 pd.DataFrame(records).to_csv(output / "evaluation" / "episodes.csv", index=False)
         finally:
             env.close()
