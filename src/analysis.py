@@ -70,6 +70,7 @@ def fit_distances(states, inputs, args):
         raise ValueError(f"Requested rank {rank} exceeds common support {support}")
     torch.manual_seed(args.analysis_seed)
     DMDc, InputDSA, SubspaceDMDc = load_dsa()
+    from src.dsa_episodes import EpisodeSeparatedDMDc
     from src.dsa_numerics import StableControllabilityDistance
 
     if args.protocol == "corrected" and args.backend == "dmdc":
@@ -88,6 +89,25 @@ def fit_distances(states, inputs, args):
         device=args.device,
     )
     engine.simdist = StableControllabilityDistance(**engine.simdist_config)
+    if args.protocol == "corrected":
+        if args.backend != "dmdc":
+            raise ValueError("Corrected episode-separated dynamics require --backend dmdc")
+        # InputDSA recognizes exact external classes only. Register DMDc through
+        # its public constructor, then supply adapters as its fitted systems.
+        engine.dmds = [
+            [
+                EpisodeSeparatedDMDc(
+                    data=xs,
+                    control_data=us,
+                    n_delays=args.n_delays,
+                    rank_output=rank,
+                    rank_input=None,
+                    lamb=args.dmd_regularization,
+                    device=args.device,
+                )
+                for xs, us in zip(states, inputs)
+            ]
+        ]
     joint = engine.fit_score()
     result = {"joint": joint[:, :, 0], "state_joint": joint[:, :, 1], "control_joint": joint[:, :, 2]}
     engine.update_compare_method(
@@ -113,6 +133,7 @@ def fit_distances(states, inputs, args):
                 "control_operator_norm": float(np.linalg.norm(b)),
                 "state_condition": float(np.linalg.cond(a)),
                 "control_singular_values": np.linalg.svd(b, compute_uv=False).tolist(),
+                "episode_transition_counts": getattr(model, "episode_transition_counts", None),
             }
         )
     for name, matrix in result.items():
@@ -124,6 +145,8 @@ def fit_distances(states, inputs, args):
         "n_delays": args.n_delays,
         "backend": args.backend,
         "dmd_class": klass.__name__,
+        "episode_boundaries_preserved": args.protocol == "corrected",
+        "dmd_adapter": "EpisodeSeparatedDMDc" if args.protocol == "corrected" else None,
         "controllability_precision": "float64",
         "controllability_alignment": "scaled_cross_product",
         "operators": diagnostics,
@@ -173,6 +196,8 @@ def performance_table(args, frame):
         if metadata.get("selection_sha256") != file_hash(args.selected_csv):
             raise ValueError("Evaluation selection fingerprint mismatch")
         episodes = episodes[(episodes.csv_idx >= 0) & episodes.task.isin(args.tasks)]
+        if args.protocol == "corrected":
+            episodes = episodes[episodes.policy_seed.isin(args.policy_seeds)]
         per_seed = episodes.groupby(["task", "csv_idx", "policy_seed"], as_index=False)["return"].mean()
         result = (
             per_seed.groupby(["task", "csv_idx"], as_index=False)["return"].agg(["mean", "std", "count"]).reset_index()
@@ -209,7 +234,7 @@ def rank_groups(frame, scores, group_size):
     return pd.concat([top.sort_values("stratum", kind="stable"), bottom.sort_values("stratum", kind="stable")])
 
 
-def load_trajectories(args, frame, task):
+def load_trajectories(args, frame, task, policy_seed=None):
     """Load aligned system trials, returning filtered metadata and exclusions."""
     registry = pd.read_csv(args.trajectories_csv, keep_default_na=False) if args.trajectories_csv else None
     if args.protocol == "corrected" and registry is None:
@@ -234,8 +259,16 @@ def load_trajectories(args, frame, task):
                 entries = registry[(registry.task == task) & (registry.csv_idx == int(row.csv_idx))].sort_values(
                     ["policy_seed", "episode"]
                 )
+                if policy_seed is not None:
+                    entries = entries[entries.policy_seed == policy_seed]
                 if entries.empty:
                     raise FileNotFoundError("No registered episodes")
+                if policy_seed is not None:
+                    expected = set(range(args.evaluation_episodes))
+                    if entries.episode.duplicated().any() or set(entries.episode) != expected:
+                        raise ValueError(
+                            f"Incomplete/duplicate episodes for {task} idx {row.csv_idx} policy {policy_seed}"
+                        )
                 xs, us = [], []
                 for _, entry in entries.iterrows():
                     if int(entry.reservoir_seed) != int(row.seed):
@@ -245,6 +278,18 @@ def load_trajectories(args, frame, task):
                     with np.load(entry.path, allow_pickle=False) as data:
                         if str(data["protocol"]) != args.protocol or int(data["csv_idx"]) != int(row.csv_idx):
                             raise ValueError("Trajectory payload identity mismatch")
+                        if policy_seed is not None:
+                            if (
+                                int(data["policy_seed"]) != policy_seed
+                                or int(data["episode"]) != int(entry.episode)
+                                or int(data["reservoir_seed"]) != int(row.seed)
+                            ):
+                                raise ValueError("Trajectory policy/episode payload identity mismatch")
+                            if (
+                                str(data["matrix_hash"]) != entry.matrix_hash
+                                or str(data["readin_hash"]) != entry.readin_hash
+                            ):
+                                raise ValueError("Trajectory payload matrix fingerprint mismatch")
                         xs.append(data["states"])
                         us.append(data["inputs"])
             states.append(xs)
@@ -257,6 +302,90 @@ def load_trajectories(args, frame, task):
     if len(rows) < 2:
         raise ValueError("Fewer than two complete trajectories remain")
     return pd.DataFrame(rows), states, inputs, excluded
+
+
+def fit_policy_trajectories(args, frame, task, output):
+    """Fit one system per reservoir/policy and average all cross-policy pairs."""
+    if args.protocol != "corrected" or args.backend != "dmdc":
+        raise ValueError("Policy-specific dynamics require corrected DMDc")
+    registry = pd.read_csv(args.trajectories_csv, keep_default_na=False)
+    relevant = registry[
+        (registry.task == task) & registry.csv_idx.isin(frame.csv_idx) & registry.policy_seed.isin(args.policy_seeds)
+    ]
+    if (
+        "readin_hash" not in relevant
+        or relevant.readin_hash.eq("").any()
+        or relevant.groupby("csv_idx").readin_hash.nunique().ne(1).any()
+    ):
+        raise ValueError("Policy replicates must share the same read-in matrix per reservoir/task")
+    systems, xs, us, exclusions = [], [], [], []
+    complete = set(frame.csv_idx)
+    for seed in args.policy_seeds:
+        rows, states, inputs, excluded = load_trajectories(args, frame, task, policy_seed=seed)
+        complete.intersection_update(rows.csv_idx)
+        exclusions.extend({**entry, "policy_seed": seed} for entry in excluded)
+        for (_, row), x, u in zip(rows.iterrows(), states, inputs):
+            systems.append({**row.to_dict(), "policy_seed": seed, "episode_count": len(x)})
+            xs.append(x)
+            us.append(u)
+    positions = [i for i, row in enumerate(systems) if row["csv_idx"] in complete]
+    systems = pd.DataFrame([systems[i] for i in positions])
+    if len(complete) < 2:
+        raise ValueError("Need at least two reservoirs with all requested policy replicates")
+    xs, us = [xs[i] for i in positions], [us[i] for i in positions]
+    matrices, diagnostics = fit_distances(xs, us, args)
+    cohort = frame[frame.csv_idx.isin(complete)].copy()
+    aggregated = aggregate_policy_distances(matrices, systems, cohort.csv_idx, args.policy_seeds)
+    diagnostics.update(
+        dynamics_schema_version=2,
+        aggregation="mean_all_cross_policy_pairs",
+        policy_seeds=args.policy_seeds,
+        fitted_system_count=len(systems),
+        pairs_per_reservoir_pair=len(args.policy_seeds) ** 2,
+        system_order=systems[["csv_idx", "policy_seed", "episode_count"]].to_dict("records"),
+    )
+    np.savez_compressed(
+        output / "analysis" / f"{task}_reservoir_distances.npz",
+        **aggregated,
+        csv_idx=cohort.csv_idx.to_numpy(),
+        policy_seeds=np.asarray(args.policy_seeds),
+        rank=diagnostics["rank"],
+        n_delays=args.n_delays,
+        protocol=args.protocol,
+    )
+    np.savez_compressed(
+        output / "analysis" / f"{task}_policy_distances.npz",
+        **matrices,
+        csv_idx=systems.csv_idx.to_numpy(),
+        policy_seed=systems.policy_seed.to_numpy(),
+        rank=diagnostics["rank"],
+        n_delays=args.n_delays,
+        protocol=args.protocol,
+    )
+    systems.to_csv(output / "analysis" / f"{task}_policy_order.csv", index=False)
+    return cohort, aggregated, diagnostics, exclusions
+
+
+def aggregate_policy_distances(matrices, systems, reservoir_ids, policy_seeds):
+    """Average the complete Cartesian product of policy pairs for distinct reservoirs."""
+    blocks = []
+    for index in reservoir_ids:
+        rows = systems[systems.csv_idx == index]
+        if rows.policy_seed.duplicated().any() or set(rows.policy_seed) != set(policy_seeds):
+            raise ValueError(f"Incomplete policy systems for reservoir {index}")
+        blocks.append(rows.index.to_numpy())
+    result = {}
+    for name, matrix in matrices.items():
+        if matrix.shape != (len(systems), len(systems)) or not np.isfinite(matrix).all():
+            raise ValueError(f"Invalid policy distance matrix: {name}")
+        if not np.allclose(matrix, matrix.T):
+            raise ValueError(f"Asymmetric policy distance matrix: {name}")
+        distance = np.zeros((len(blocks), len(blocks)))
+        for i, a in enumerate(blocks):
+            for j in range(i):
+                distance[i, j] = distance[j, i] = matrix[np.ix_(a, blocks[j])].mean()
+        result[name] = distance
+    return result
 
 
 def ou_noise(n_timesteps, dim=10, theta=0.15, seed=0):

@@ -160,6 +160,7 @@ def analyze_distances(args, frame, output, workflow):
     from src.analysis import (
         METRICS,
         fit_distances,
+        fit_policy_trajectories,
         h1_test,
         holm,
         load_trajectories,
@@ -185,14 +186,27 @@ def analyze_distances(args, frame, output, workflow):
             if workflow in SYNTHETIC | {"inputdsa_100_reservoirs_H2"}
             else frame.copy()
         )
-        if top_bottom:
-            selected = rank_groups(frame, scores[scores.task == identifier].drop(columns="task"), args.group_size)
-        if workflow in SYNTHETIC:
-            xs, us = synthetic_trajectories(args, selected, identifier)
-        else:
-            selected, xs, us, excluded = load_trajectories(args, selected, identifier)
+        if args.protocol == "corrected" and workflow not in SYNTHETIC:
+            cohort, all_matrices, diagnostics, excluded = fit_policy_trajectories(args, frame, identifier, output)
             exclusions.extend(excluded)
-        matrices, diagnostics = fit_distances(xs, us, args)
+            selected = (
+                rank_groups(cohort, scores[scores.task == identifier].drop(columns="task"), args.group_size)
+                if top_bottom
+                else cohort.sort_values("stratum", kind="stable")
+                if workflow == "inputdsa_100_reservoirs_H2"
+                else cohort
+            )
+            positions = cohort.set_index("csv_idx").index.get_indexer(selected.csv_idx)
+            matrices = {name: matrix[np.ix_(positions, positions)] for name, matrix in all_matrices.items()}
+        else:
+            if top_bottom:
+                selected = rank_groups(frame, scores[scores.task == identifier].drop(columns="task"), args.group_size)
+            if workflow in SYNTHETIC:
+                xs, us = synthetic_trajectories(args, selected, identifier)
+            else:
+                selected, xs, us, excluded = load_trajectories(args, selected, identifier)
+                exclusions.extend(excluded)
+            matrices, diagnostics = fit_distances(xs, us, args)
         save_distances(output, identifier, selected, matrices, diagnostics, args)
         if workflow in {"inputdsa_100_reservoirs_H1", "inputdsa_top_bottom_10_reservoirs_H1"}:
             pool = pool_reference(args) if args.protocol == "corrected" else None

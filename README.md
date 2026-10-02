@@ -63,6 +63,34 @@ uv run --locked python scripts/analyze_hypotheses.py \
 
 Selection uses only eight structural descriptors and stratified MaxMin diversity. Training cannot affect the selection. Paper H1 compares within-top and within-bottom dynamical distances; paper H2 compares descriptor distance with absolute mean-return difference. Tests permute reservoir labels to preserve dependence among pairwise distances. Their new p-values need not match the manuscript's historical values.
 
+Corrected trajectory analyses fit one DMDc system per reservoir and policy seed.
+Each episode's source/target transitions are built separately before concatenation,
+so episode resets never become fitted transitions. With 20 reservoirs and five
+policy seeds, this fits 100 systems per task and chooses one common rank across
+all 100 before selecting top/bottom groups. Reservoir-pair distances average all
+25 cross-policy combinations with equal weight.
+
+Analysis exports `<task>_policy_distances.npz` and `<task>_policy_order.csv` for
+the individual fitted systems, `<task>_reservoir_distances.npz` for the complete
+aggregated cohort, and the existing `<task>_distances.npz` for the ordered analysis
+groups. Diagnostics record system identities, episode transition counts, rank,
+and aggregation settings. Missing policies, duplicate/incomplete episodes, or
+inconsistent read-in hashes halt analysis. Defaults require policy seeds 0–4 and
+ten episodes each; use `--policy-seeds` and `--dynamics-episodes` for explicitly
+different designs. `--smoke` requires one seed and one episode.
+
+Rerun analysis with a new run ID after updating the code; existing trained models
+and episode files can be reused. Earlier pooled-fit results must be recomputed.
+This fixes fitting and aggregation; it does not supply separate ranking/dynamics
+episodes, matched-seed bootstrap inference, or the other Solution 1 additions.
+
+InputDSA controllability scoring uses double precision and scales the SVD
+cross-product to avoid overflow from large powers of fitted dynamics matrices.
+Distances retain their original units, and fitted operators are unchanged.
+Per-system spectral radii and scoring precision are recorded in analysis
+diagnostics. Powers that exceed double-precision range fail with an explicit
+error; changing rank or regularization requires an explicit analysis choice.
+
 ## Resuming training
 
 Stop the old training process before resuming the same run directory. Add `--resume`
