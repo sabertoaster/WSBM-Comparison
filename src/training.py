@@ -11,7 +11,15 @@ import numpy as np
 import pandas as pd
 
 from src.reservoirs import load_reservoir, reservoir_path
-from src.utils import configure_tensorboard, experiment_name, file_hash, legacy_config, matrix_hash, write_json
+from src.utils import (
+    configure_tensorboard,
+    experiment_name,
+    file_hash,
+    imported_artifact_path,
+    legacy_config,
+    matrix_hash,
+    write_json,
+)
 
 
 def make_environment(task, config, row=None, selected_csv=None, baseline=False, environment_seed=0):
@@ -370,6 +378,12 @@ def load_registry(args, frame):
     if args.limit is not None:
         ids = frame.csv_idx.head(args.limit)
         registry = registry[(registry.csv_idx < 0) | registry.csv_idx.isin(ids)]
+    if args.protocol == "corrected":
+        registry = registry[registry.policy_seed.isin(args.policy_seeds)].copy()
+        if registry.empty:
+            raise ValueError("No models found for requested policy seeds")
+        for column in ("model_path", "config_path"):
+            registry[column] = registry[column].map(lambda value: str(imported_artifact_path(value, args.models_csv)))
     return registry
 
 

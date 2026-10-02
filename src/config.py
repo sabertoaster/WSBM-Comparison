@@ -21,7 +21,7 @@ WORKFLOWS = {
     "inputdsa_100_reservoirs_mackey_glass_ou": "Compare all selected reservoirs under synthetic inputs.",
     "get_top_bottom_10_3_tasks": "Rank reservoirs using evaluation returns or historical TensorBoard rewards.",
     "descriptor_space_plot_performance": "Color structural PCA by reservoir performance.",
-    "analyze_hypotheses": "Run paper H1 on trajectories and paper H2 on deterministic returns.",
+    "analyze_hypotheses": "Run Solution 1 H1, structure–dynamics inference, figures and separate paper H2.",
     "generate_fig_1": "Draw four canonical WSBM architectures.",
     "random_scores": "Evaluate random-action policies without training.",
 }
@@ -344,6 +344,16 @@ def build_parser(workflow):
         parser.add_argument("--training-steps", type=positive, default=500000)
     if workflow in {"analyze_hypotheses", "dev_scripts"}:
         parser.add_argument("--permutations", type=positive, default=9999)
+    if workflow == "analyze_hypotheses":
+        parser.add_argument("--interim", action="store_true", help="Analyze complete tasks before all five finish")
+        parser.add_argument("--bootstrap-replicates", type=positive, default=5000)
+        parser.add_argument("--models-csv", help="Training registry for settings, checkpoint and learning-curve audit")
+        parser.add_argument("--distance-cache", type=str, help="Reuse a matching Solution 1 run's fitted distances")
+        parser.add_argument(
+            "--exploratory-reuse-ranking-episodes",
+            action="store_true",
+            help="Explicitly allow old ranking episodes for exploratory dynamics; never confirmatory",
+        )
     if workflow in SYNTHETIC:
         parser.add_argument("--input-steps", type=positive, default=2000 if "5_systems" in workflow else 3000)
         parser.add_argument("--input-dim", type=positive, default=10)
@@ -420,6 +430,12 @@ def parse_args(workflow, argv=None):
         else "n4sid"
     )
     args.ranking_source = args.ranking_source or ("evaluation" if corrected else "tensorboard")
+    if (
+        corrected
+        and workflow == "analyze_hypotheses"
+        and not any(item.startswith("--group-size") for item in arguments)
+    ):
+        args.group_size = 5
     legacy_tasks = {
         "random_scores": [
             "Ant-v4",
@@ -454,7 +470,11 @@ def parse_args(workflow, argv=None):
         args.tasks = args.task_names
     if getattr(args, "env_id", None):
         args.tasks = [args.env_id]
-    if workflow == "plot_context_embeddings" and not any(t.startswith("--tasks") for t in arguments) and not args.env_id:
+    if (
+        workflow == "plot_context_embeddings"
+        and not any(t.startswith("--tasks") for t in arguments)
+        and not args.env_id
+    ):
         args.tasks = list(TASKS)
     if (
         workflow == "train_rl"
@@ -525,6 +545,8 @@ def parse_args(workflow, argv=None):
             args.density_range, args.topology_range = [0.15, 0.25], [0.5, 2]
         if workflow == "plot_context_embeddings":
             args.cebra_iterations, args.cebra_batch_size = 10, 32
+        if workflow == "analyze_hypotheses":
+            args.bootstrap_replicates = 50
     if not 0 < args.res_lr <= 1 or not 0 < args.res_sr < 1 or args.res_iss <= 0:
         parser.error("require 0 < leak rate <= 1, 0 < spectral radius < 1, and positive input scaling")
     if workflow == "plot_context_embeddings" and (args.cebra_learning_rate <= 0 or args.cebra_delta <= 0):

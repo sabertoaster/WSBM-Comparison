@@ -8,6 +8,165 @@ from src.utils import DESCRIPTORS, STRATA, align_curves, read_scalars, standardi
 COLORS = dict(zip(STRATA, ("tab:orange", "tab:green", "tab:red", "tab:purple", "tab:brown")))
 
 
+def save_publication_figure(fig, output, name, dpi):
+    """Save the same publication figure as a raster preview and vector PDF."""
+    for extension in ("png", "pdf"):
+        fig.savefig(output / "figures" / f"{name}.{extension}", dpi=dpi, bbox_inches="tight")
+    pyplot().close(fig)
+
+
+def plot_solution1_performance(task, frame, returns, weights, curves, seeds, output, dpi):
+    """Plot every seed, conditional mean intervals, and equal-weight family summaries."""
+    import pandas as pd
+
+    plt = pyplot()
+    rows = int(np.ceil(len(frame) / 4))
+    fig, axes = plt.subplots(rows, 4, figsize=(18, rows * 3), squeeze=False)
+    learning = []
+    for i, row in enumerate(frame.itertuples()):
+        axis = axes.flat[i]
+        recorded = [curves[(task, row.csv_idx, seed)] for seed in seeds]
+        low = max(steps[0] for steps, _ in recorded)
+        high = min(steps[-1] for steps, _ in recorded)
+        if low >= high:
+            raise ValueError(f"No common observed training interval: {task} idx {row.csv_idx}")
+        grid = np.unique(np.concatenate([steps for steps, _ in recorded]))
+        grid = grid[(grid >= low) & (grid <= high)]
+        values = np.array([np.interp(grid, steps, values) for steps, values in recorded])
+        bootstrap = weights @ values
+        lower, upper = np.quantile(bootstrap, [0.025, 0.975], axis=0)
+        mean = values.mean(axis=0)
+        for seed, curve in zip(seeds, values):
+            axis.plot(grid, curve, alpha=0.5, linewidth=0.8, label=f"seed {seed}")
+        axis.plot(grid, mean, color="black", linewidth=1.4, label="seed mean")
+        axis.fill_between(grid, lower, upper, color="black", alpha=0.15, label="pointwise 95% CI")
+        axis.set_title(f"idx {row.csv_idx}: {row.stratum}", fontsize=9)
+        axis.set_xlabel("Observed training steps", fontsize=8)
+        axis.set_ylabel("Training episode return", fontsize=8)
+        table = pd.DataFrame(
+            dict(
+                task=task,
+                csv_idx=row.csv_idx,
+                training_step=grid,
+                mean=mean,
+                ci_low=lower,
+                ci_high=upper,
+                interpolation="linear within common observed interval",
+            )
+        )
+        for seed, curve in zip(seeds, values):
+            table[f"seed_{seed}"] = curve
+        learning.append(table)
+    for axis in axes.flat[len(frame) :]:
+        axis.set_visible(False)
+    axes.flat[0].legend(fontsize=6)
+    fig.suptitle(f"{task}: all policy learning curves; conditional pointwise intervals")
+    fig.tight_layout()
+    save_publication_figure(fig, output, f"{task}_learning_curves", dpi)
+    pd.concat(learning, ignore_index=True).to_csv(output / "analysis" / f"{task}_learning_curves.csv", index=False)
+    bootstrap = weights @ returns.T
+    low, high = np.quantile(bootstrap, [0.025, 0.975], axis=0)
+    mean = returns.mean(axis=1)
+    fig, axis = plt.subplots(figsize=(14, 5))
+    positions = np.arange(len(frame))
+    for s, seed in enumerate(seeds):
+        axis.scatter(
+            positions + (s - (len(seeds) - 1) / 2) * 0.08, returns[:, s], s=22, alpha=0.7, label=f"seed {seed}"
+        )
+    axis.vlines(positions, low, high, color="black", label="conditional 95% CI of mean")
+    axis.scatter(positions, mean, marker="_", s=120, color="black", label="equal-weight seed mean")
+    axis.set_xticks(positions, frame.csv_idx)
+    axis.set_xlabel("Reservoir csv_idx")
+    axis.set_ylabel("Mean deterministic ranking-episode return")
+    axis.set_title(f"{task}: separate policy seed means")
+    axis.legend(fontsize=8)
+    save_publication_figure(fig, output, f"{task}_evaluation_returns", dpi)
+    table = frame[["csv_idx", "stratum"]].copy()
+    table["task"], table["mean"], table["ci_low"], table["ci_high"] = task, mean, low, high
+    for s, seed in enumerate(seeds):
+        table[f"seed_{seed}"] = returns[:, s]
+    table.to_csv(output / "analysis" / f"{task}_evaluation_returns.csv", index=False)
+    fig, axis = plt.subplots(figsize=(10, 5))
+    family_rows = []
+    families = [f for f in STRATA if (frame.stratum == f).any()]
+    for position, family in enumerate(families):
+        keep = frame.stratum.to_numpy() == family
+        estimates = bootstrap[:, keep].mean(axis=1)
+        a, b = np.quantile(estimates, [0.025, 0.975])
+        average = mean[keep].mean()
+        axis.scatter(np.full(keep.sum(), position), mean[keep], s=30, alpha=0.7, color=COLORS[family])
+        axis.vlines(position + 0.2, a, b, color="black")
+        axis.scatter(position + 0.2, average, marker="_", s=100, color="black")
+        family_rows.append(
+            dict(
+                task=task,
+                stratum=family,
+                reservoir_count=int(keep.sum()),
+                equal_reservoir_mean=average,
+                ci_low=a,
+                ci_high=b,
+                scope="conditional selected structures; limited wider-family evidence",
+            )
+        )
+    axis.set_xticks(range(len(families)), families)
+    axis.set_ylabel("Reservoir mean ranking return")
+    axis.set_title(f"{task}: supplementary selected-family means and conditional 95% CI")
+    save_publication_figure(fig, output, f"{task}_family_returns", dpi)
+    pd.DataFrame(family_rows).to_csv(output / "analysis" / f"{task}_family_returns.csv", index=False)
+
+
+def plot_solution1_inference(task, rankings, pairs, bands, groups, output, dpi):
+    """Show all pairs, fixed-group raw distances, and conditional descriptive trend bands."""
+    from src.solution1_stats import PRIMARY
+
+    plt = pyplot()
+    palette = {"TT": "tab:blue", "BB": "tab:orange", "TB": "tab:green", "Other": "gray"}
+    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+    for axis, metric in zip(axes, PRIMARY):
+        for label, subset in pairs.groupby("pair_group"):
+            axis.scatter(subset.minimum_return, subset[metric], color=palette[label], s=12, alpha=0.65, label=label)
+        axis.set_xlabel("Minimum of the two reservoir mean returns")
+        axis.set_ylabel(metric)
+        axis.set_title(f"{task}: continuous H1, all {len(pairs)} dependent pairs")
+        axis.legend(fontsize=8)
+    save_publication_figure(fig, output, f"{task}_h1_continuous", dpi)
+    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+    for axis, metric in zip(axes, PRIMARY):
+        row = groups[groups.metric == metric].iloc[0]
+        for i, label in enumerate(("TT", "BB", "TB")):
+            values = pairs.loc[pairs.pair_group == label, metric].to_numpy()
+            offsets = np.linspace(-0.12, 0.12, len(values))
+            axis.scatter(i + offsets, values, color=palette[label], s=22, alpha=0.6)
+            axis.vlines(i + 0.22, row[f"{label}_ci_low"], row[f"{label}_ci_high"], color="black")
+            axis.scatter(i + 0.22, row[label], color="black", marker="_", s=100)
+        axis.set_xticks(range(3), ["Top–top", "Bottom–bottom", "Top–bottom"])
+        axis.set_ylabel(metric)
+        axis.set_title(f"{task}: fixed groups, dependent raw pairs\nmean and conditional 95% CI")
+    save_publication_figure(fig, output, f"{task}_h1_groups", dpi)
+    fig, axes = plt.subplots(2, 2, figsize=(12, 10))
+    for row_index, structural_metric in enumerate(("euclidean", "mahalanobis")):
+        for axis, metric in zip(axes[row_index], PRIMARY):
+            for label, subset in pairs.groupby("pair_group"):
+                axis.scatter(
+                    subset[structural_metric], subset[metric], color=palette[label], s=12, alpha=0.65, label=label
+                )
+            band = bands[(bands.metric == metric) & (bands.structural_metric == structural_metric)]
+            axis.plot(band.structural_distance, band.descriptive_ols, color="black", label="descriptive OLS")
+            axis.fill_between(
+                band.structural_distance,
+                band.ci_low,
+                band.ci_high,
+                color="black",
+                alpha=0.15,
+                label="conditional pointwise 95% band",
+            )
+            axis.set_xlabel(f"Candidate-pool standardized {structural_metric} distance")
+            axis.set_ylabel(metric)
+            axis.set_title(f"{task}: Fig. 3B ({'primary' if row_index == 0 else 'sensitivity'})")
+            axis.legend(fontsize=7)
+    save_publication_figure(fig, output, f"{task}_structure_dynamics", dpi)
+
+
 def pyplot():
     """Load a headless pyplot backend only when a figure is requested."""
     import matplotlib

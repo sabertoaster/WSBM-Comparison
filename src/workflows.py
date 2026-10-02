@@ -309,6 +309,7 @@ def analyze_h2(args, frame, output):
                 axis.set_xlabel("Structural distance")
                 axis.set_ylabel("Absolute mean-return difference")
                 fig.savefig(output / "figures" / f"{task}_h2.png", dpi=args.dpi, bbox_inches="tight")
+                fig.savefig(output / "figures" / f"{task}_h2.pdf", bbox_inches="tight")
                 plt.close(fig)
                 indices = np.triu_indices(len(subset), 1)
                 ids = subset.csv_idx.to_numpy()
@@ -368,6 +369,10 @@ def dispatch(args, frame, output, workflow):
         generate_motifs(args, output)
         return {"figure": "figures/wsbm_motifs.png"}
     if workflow in DSA_WORKFLOWS:
+        if workflow == "analyze_hypotheses" and args.protocol == "corrected":
+            from src.solution1 import run_solution1
+
+            return run_solution1(args, frame, output)
         result = analyze_distances(args, frame, output, workflow)
         if workflow == "analyze_hypotheses":
             result.update(analyze_h2(args, frame, output))

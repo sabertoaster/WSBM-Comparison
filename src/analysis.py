@@ -18,6 +18,7 @@ from src.utils import (
     delay_embed,
     experiment_name,
     file_hash,
+    imported_artifact_path,
     legacy_config,
     read_scalars,
     standardize,
@@ -261,6 +262,8 @@ def load_trajectories(args, frame, task, policy_seed=None):
                 )
                 if policy_seed is not None:
                     entries = entries[entries.policy_seed == policy_seed]
+                    if getattr(args, "smoke", False):
+                        entries = entries[entries.episode < args.evaluation_episodes]
                 if entries.empty:
                     raise FileNotFoundError("No registered episodes")
                 if policy_seed is not None:
@@ -275,7 +278,7 @@ def load_trajectories(args, frame, task, policy_seed=None):
                         raise ValueError("Trajectory reservoir seed mismatch")
                     if args.protocol == "corrected" and entry.matrix_hash != row.matrix_hash:
                         raise ValueError("Trajectory matrix hash mismatch")
-                    with np.load(entry.path, allow_pickle=False) as data:
+                    with np.load(imported_artifact_path(entry.path, args.trajectories_csv), allow_pickle=False) as data:
                         if str(data["protocol"]) != args.protocol or int(data["csv_idx"]) != int(row.csv_idx):
                             raise ValueError("Trajectory payload identity mismatch")
                         if policy_seed is not None:

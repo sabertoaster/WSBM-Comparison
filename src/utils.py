@@ -48,6 +48,30 @@ def file_hash(path):
     return digest.hexdigest()
 
 
+def imported_artifact_path(value, anchor):
+    """Resolve a downloaded registry path beneath its local artifact root.
+
+    An existing original path wins. Otherwise preserve everything after the
+    artifacts component, using the local registry's artifact root. Never search
+    by basename or modify the registry.
+    """
+    path = Path(value).expanduser()
+    if path.exists():
+        return path.resolve()
+    anchor = Path(anchor).resolve()
+    if not path.is_absolute():
+        local = anchor.parent / path
+        if local.exists():
+            return local.resolve()
+    if "artifacts" in path.parts and "artifacts" in anchor.parts:
+        source = path.parts.index("artifacts")
+        target = anchor.parts.index("artifacts")
+        local = Path(*anchor.parts[: target + 1]).joinpath(*path.parts[source + 1 :])
+        if local.exists():
+            return local.resolve()
+    raise FileNotFoundError(f"Cannot resolve artifact {value} relative to {anchor}")
+
+
 def matrix_hash(matrix):
     """Hash shape, dtype, and contiguous array bytes for matrix identity checks."""
     if hasattr(matrix, "toarray"):
