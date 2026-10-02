@@ -70,6 +70,8 @@ def fit_distances(states, inputs, args):
         raise ValueError(f"Requested rank {rank} exceeds common support {support}")
     torch.manual_seed(args.analysis_seed)
     DMDc, InputDSA, SubspaceDMDc = load_dsa()
+    from src.dsa_numerics import StableControllabilityDistance
+
     if args.protocol == "corrected" and args.backend == "dmdc":
         klass = DMDc
         config = {"n_delays": args.n_delays, "rank_output": rank, "rank_input": None, "lamb": args.dmd_regularization}
@@ -85,6 +87,7 @@ def fit_distances(states, inputs, args):
         n_jobs=args.workers,
         device=args.device,
     )
+    engine.simdist = StableControllabilityDistance(**engine.simdist_config)
     joint = engine.fit_score()
     result = {"joint": joint[:, :, 0], "state_joint": joint[:, :, 1], "control_joint": joint[:, :, 2]}
     engine.update_compare_method(
@@ -93,6 +96,7 @@ def fit_distances(states, inputs, args):
     )
     result["state_separate"] = engine.score()
     engine.update_compare_method(compare="control", simdist_config={"score_method": "euclidean"})
+    engine.simdist = StableControllabilityDistance(**engine.simdist_config)
     result["control_separate"] = engine.score()
     diagnostics = []
     for model in engine.dmds[0]:
@@ -105,6 +109,7 @@ def fit_distances(states, inputs, args):
         diagnostics.append(
             {
                 "state_operator_norm": float(np.linalg.norm(a)),
+                "state_spectral_radius": float(np.max(np.abs(np.linalg.eigvals(a.astype(np.float64))))),
                 "control_operator_norm": float(np.linalg.norm(b)),
                 "state_condition": float(np.linalg.cond(a)),
                 "control_singular_values": np.linalg.svd(b, compute_uv=False).tolist(),
@@ -119,6 +124,8 @@ def fit_distances(states, inputs, args):
         "n_delays": args.n_delays,
         "backend": args.backend,
         "dmd_class": klass.__name__,
+        "controllability_precision": "float64",
+        "controllability_alignment": "scaled_cross_product",
         "operators": diagnostics,
         "rank_capped": max(ranks) > rank,
     }
