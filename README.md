@@ -63,6 +63,43 @@ uv run --locked python scripts/analyze_hypotheses.py \
 
 Selection uses only eight structural descriptors and stratified MaxMin diversity. Training cannot affect the selection. Paper H1 compares within-top and within-bottom dynamical distances; paper H2 compares descriptor distance with absolute mean-return difference. Tests permute reservoir labels to preserve dependence among pairwise distances. Their new p-values need not match the manuscript's historical values.
 
+## Resuming training
+
+Stop the old training process before resuming the same run directory. Add `--resume`
+to the original command to skip completed policies and continue unfinished ones from
+their latest checkpoint. You can change `--n-envs`, `--n-steps`, `--batch-size`, and
+`--device`. Other training settings and the selection must match the original run;
+`--training-steps` remains the total target per policy, not additional steps.
+
+For example, try 32 environment workers while keeping 2,048 samples per PPO rollout:
+
+```sh
+uv run --locked python scripts/train_all_selected.py \
+  --protocol corrected \
+  --selected-csv artifacts/corrected/selection-20/selection/selected.csv \
+  --run-id training-20-seeds5 --resume \
+  --policy-seeds 0 1 2 3 4 \
+  --tasks Hopper-v4 Walker2d-v4 Swimmer-v4 Ant-v4 HalfCheetah-v4 \
+  --training-steps 500000 --device cpu \
+  --n-envs 32 --n-steps 64 --batch-size 64
+```
+
+More workers can increase simulator throughput, but actual speed depends on CPU
+capacity and subprocess overhead. Shorter per-environment rollouts change advantage
+estimation even when total rollout size is unchanged. Policies still train sequentially.
+
+New training runs save an atomic `.checkpoint.zip` approximately every 10,000
+aggregate environment steps, after a completed PPO update (configure with
+`--checkpoint-steps`). Resume restores policy weights, optimizer state, and timestep
+counts, and continues TensorBoard logging. Simulator and random-generator states
+restart, so continuation is not bit-for-bit identical. At most the work since the
+last checkpoint is lost, and PPO may round the target up to a full rollout.
+
+Runs started with the older code only saved completed policies: these are skipped,
+but their unfinished policy must restart. Existing registry entries are preserved,
+including policies outside the requested task/seed subset. Resume attempts are
+recorded in `manifest.json`. Use `--resume`, without `--overwrite`.
+
 ## Small end-to-end check
 
 This sequence uses 20-neuron reservoirs, four selected configurations, one policy seed, 64 training steps, one episode, and 19 permutations. Results verify execution and data alignment, not the paper's hypotheses. Use unused run names for each retry; no cleanup is required.

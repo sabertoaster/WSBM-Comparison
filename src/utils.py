@@ -100,6 +100,31 @@ def create_run(args, workflow):
     if Path(run_id).name != run_id or run_id in {".", ".."}:
         raise ValueError("run-id must be a single directory name")
     path = root / args.protocol / run_id
+    if getattr(args, "resume", False):
+        from src.training import training_config
+
+        manifest_path = path / "manifest.json"
+        if not manifest_path.is_file():
+            raise FileNotFoundError(f"Cannot resume: missing {manifest_path}")
+        manifest = json.loads(manifest_path.read_text())
+        if manifest["workflow"] != workflow:
+            raise ValueError("Cannot resume a different workflow")
+        mutable = {"n_envs", "n_steps", "batch_size", "device"}
+        changed = [
+            key
+            for key, value in training_config(args).items()
+            if key not in mutable and manifest["arguments"].get(key) != value
+        ]
+        selection = getattr(args, "selected_csv", None)
+        if manifest.get("selection_sha256") != (file_hash(selection) if selection else None):
+            changed.append("selected_csv")
+        if changed:
+            raise ValueError(f"Cannot resume with changed settings: {', '.join(changed)}")
+        manifest.setdefault("resume_history", []).append(dict(arguments=vars(args)))
+        manifest.update(status="started")
+        write_json(manifest_path, manifest)
+        print(f"Resuming run directory: {path}", flush=True)
+        return path
     if path.exists() and not args.overwrite:
         raise FileExistsError(f"Run exists: {path}; use a new run-id or --overwrite")
     path.mkdir(parents=True, exist_ok=True)

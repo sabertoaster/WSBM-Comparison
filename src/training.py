@@ -118,7 +118,18 @@ def training_config(args):
     return {key: getattr(args, key) for key in keys}
 
 
-def train_one(task, row, policy_seed, config, output, selected_csv=None, baseline=False, indexed=True):
+def train_one(
+    task,
+    row,
+    policy_seed,
+    config,
+    output,
+    selected_csv=None,
+    baseline=False,
+    indexed=True,
+    resume=False,
+    checkpoint_steps=10000,
+):
     """Train one PPO replicate and return a registry row; always close environments."""
     configure_tensorboard()
     from stable_baselines3 import PPO
@@ -132,6 +143,11 @@ def train_one(task, row, policy_seed, config, output, selected_csv=None, baselin
     identifier = f"{name}_policy{policy_seed}"
     model_path = output / "models" / f"{identifier}.zip"
     logdir = output / "logs" / identifier
+    metadata_path = model_path.with_suffix(".json")
+    checkpoint_path = model_path.with_suffix(".checkpoint.zip")
+    if resume and model_path.is_file() and metadata_path.is_file():
+        print(f"Skipping completed policy: {identifier}", flush=True)
+        return json.loads(metadata_path.read_text())["record"]
     local_config = dict(config)
     if local_config["reservoir_seed"] is None:
         local_config["reservoir_seed"] = int(row["seed"]) if row is not None else policy_seed
@@ -147,9 +163,7 @@ def train_one(task, row, policy_seed, config, output, selected_csv=None, baselin
     env = vector_cls(factories)
     try:
         # Seed simulator state independently; PPO normally seeds it with its own seed.
-        model = PPO(
-            "MlpPolicy",
-            env,
+        policy_kwargs = dict(
             seed=policy_seed,
             learning_rate=config["learning_rate"],
             n_steps=config["n_steps"],
@@ -165,9 +179,12 @@ def train_one(task, row, policy_seed, config, output, selected_csv=None, baselin
             device=config["device"],
             verbose=1,
         )
+        if resume and checkpoint_path.is_file():
+            model = PPO.load(checkpoint_path, env=env, **policy_kwargs)
+            print(f"Resuming {identifier} at {model.num_timesteps} timesteps", flush=True)
+        else:
+            model = PPO("MlpPolicy", env, **policy_kwargs)
         env.seed(config["environment_seed"] if config["protocol"] == "corrected" else policy_seed)
-        model.learn(total_timesteps=config["training_steps"], tb_log_name=f"{prefix}_seed_{policy_seed}")
-        model.save(model_path)
         reservoir_hash = None
         readin_hash = ""
         if not baseline:
@@ -199,9 +216,50 @@ def train_one(task, row, policy_seed, config, output, selected_csv=None, baselin
             record["config_path"],
             {"environment": local_config, "row": row.to_dict() if row is not None else None, "record": record},
         )
+        from stable_baselines3.common.callbacks import BaseCallback
+
+        class ProgressCheckpoint(BaseCallback):
+            """Save only at update boundaries, never halfway through a rollout."""
+
+            def __init__(self):
+                """Track the last fully optimized checkpoint."""
+                super().__init__()
+                self.last_saved = model.num_timesteps
+
+            def _on_step(self):
+                """Continue collecting the current rollout."""
+                return True
+
+            def _on_rollout_start(self):
+                """Persist the preceding rollout after its optimizer update."""
+                if self.num_timesteps - self.last_saved >= checkpoint_steps:
+                    atomic_save_model(self.model, checkpoint_path)
+                    self.last_saved = self.num_timesteps
+
+            def _on_training_end(self):
+                """Persist the last optimizer update at the target budget."""
+                atomic_save_model(self.model, checkpoint_path)
+
+        remaining = max(0, config["training_steps"] - model.num_timesteps)
+        if remaining:
+            atomic_save_model(model, checkpoint_path)
+            model.learn(
+                total_timesteps=remaining,
+                reset_num_timesteps=False,
+                tb_log_name=f"{prefix}_seed_{policy_seed}",
+                callback=ProgressCheckpoint(),
+            )
+        atomic_save_model(model, model_path)
         return record
     finally:
         env.close()
+
+
+def atomic_save_model(model, path):
+    """Keep the previous checkpoint intact if writing the next one is interrupted."""
+    temporary = path.with_name(path.stem + ".tmp.zip")
+    model.save(temporary)
+    temporary.replace(path)
 
 
 def train_batch(args, frame, output, first_per_stratum=False, standalone=False):
@@ -211,12 +269,29 @@ def train_batch(args, frame, output, first_per_stratum=False, standalone=False):
         frame = frame.drop_duplicates("stratum")
     if args.limit is not None and frame is not None:
         frame = frame.head(args.limit)
-    records = []
+    registry_path = output / "models" / "models.csv"
+    records = (
+        pd.read_csv(registry_path, keep_default_na=False).to_dict("records")
+        if getattr(args, "resume", False) and registry_path.is_file()
+        else []
+    )
+    options = dict(resume=getattr(args, "resume", False), checkpoint_steps=getattr(args, "checkpoint_steps", 10000))
+
+    def register(record):
+        """Replace one replicate while retaining all other registry entries."""
+        key = (record["task"], record["csv_idx"], record["stratum"], record["policy_seed"])
+        records[:] = [
+            old for old in records if (old["task"], old["csv_idx"], old["stratum"], old["policy_seed"]) != key
+        ]
+        records.append(record)
+        temporary = registry_path.with_suffix(".tmp.csv")
+        pd.DataFrame(records).to_csv(temporary, index=False)
+        temporary.replace(registry_path)
+
     for task in args.tasks:
         if args.baseline or (standalone and not args.use_reservoir):
             for seed in args.policy_seeds:
-                records.append(train_one(task, None, seed, config, output, baseline=True))
-                pd.DataFrame(records).to_csv(output / "models" / "models.csv", index=False)
+                register(train_one(task, None, seed, config, output, baseline=True, **options))
         if not args.use_reservoir:
             continue
         rows = (
@@ -231,10 +306,18 @@ def train_batch(args, frame, output, first_per_stratum=False, standalone=False):
                 if args.protocol == "legacy" and row is not None and not standalone:
                     actual_seed = int(row["seed"]) + seed
                     local["reservoir_seed"] = actual_seed
-                records.append(
-                    train_one(task, row, actual_seed, local, output, args.selected_csv, indexed=not first_per_stratum)
+                register(
+                    train_one(
+                        task,
+                        row,
+                        actual_seed,
+                        local,
+                        output,
+                        args.selected_csv,
+                        indexed=not first_per_stratum,
+                        **options,
+                    )
                 )
-                pd.DataFrame(records).to_csv(output / "models" / "models.csv", index=False)
     return pd.DataFrame(records)
 
 

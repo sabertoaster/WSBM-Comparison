@@ -204,6 +204,14 @@ def build_parser(workflow):
         "figure_layout": "community",
     }
     parser.set_defaults(**defaults)
+    if workflow in TRAINING:
+        parser.add_argument("--resume", action="store_true", help="Resume an existing run, skipping completed policies")
+        parser.add_argument(
+            "--checkpoint-steps",
+            type=positive,
+            default=10000,
+            help="Save progress after PPO updates at approximately this many environment timesteps",
+        )
     if workflow not in {"select_reservoirs", "generate_fig_1", "random_scores"}:
         parser.add_argument(
             "--selected-csv",
@@ -376,6 +384,8 @@ def parse_args(workflow, argv=None):
     arguments = list(sys.argv[1:] if argv is None else argv)
     parser = build_parser(workflow)
     args = parser.parse_args(arguments)
+    if getattr(args, "resume", False) and (not args.run_id or args.overwrite):
+        parser.error("--resume requires --run-id and cannot be combined with --overwrite")
     corrected = args.protocol == "corrected"
     args.requested_units = args.units
     args.units = args.units or (
