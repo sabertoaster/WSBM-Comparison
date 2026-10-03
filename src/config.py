@@ -300,7 +300,10 @@ def build_parser(workflow):
         parser.add_argument("--cebra-learning-rate", type=finite_float, default=3e-4)
         parser.add_argument("--cebra-delta", type=finite_float, default=0.1)
     if workflow in DSA_WORKFLOWS:
-        parser.add_argument("--backend", choices=("dmdc", "n4sid"))
+        parser.add_argument(
+            "--backend", choices=("dmdc", "n4sid"),
+            help="Corrected default: n4sid; explicit dmdc reproduces original Solution 1",
+        )
         parser.add_argument("--n-delays", type=positive, default=10 if workflow in SYNTHETIC else 3)
         parser.add_argument("--rank", type=positive, help="Explicit common rank; default uses energy selection")
         parser.add_argument("--rank-energy", type=finite_float, default=0.99)
@@ -349,6 +352,10 @@ def build_parser(workflow):
         parser.add_argument("--bootstrap-replicates", type=positive, default=5000)
         parser.add_argument("--models-csv", help="Training registry for settings, checkpoint and learning-curve audit")
         parser.add_argument("--distance-cache", type=str, help="Reuse a matching Solution 1 run's fitted distances")
+        parser.add_argument(
+            "--exploratory-identification", action="store_true",
+            help="Allow changed identification/inference settings without allowing ranking-episode reuse",
+        )
         parser.add_argument(
             "--exploratory-reuse-ranking-episodes",
             action="store_true",
@@ -426,7 +433,7 @@ def parse_args(workflow, argv=None):
     args.reset_res = corrected if args.reset_res is None else args.reset_res
     args.backend = args.backend or (
         "dmdc"
-        if corrected or workflow in {"inputdsa_100_reservoirs_H1", "inputdsa_top_bottom_10_reservoirs_H1"}
+        if not corrected and workflow in {"inputdsa_100_reservoirs_H1", "inputdsa_top_bottom_10_reservoirs_H1"}
         else "n4sid"
     )
     args.ranking_source = args.ranking_source or ("evaluation" if corrected else "tensorboard")

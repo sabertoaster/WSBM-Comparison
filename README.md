@@ -36,34 +36,49 @@ uv run --locked python scripts/inputdsa_100_reservoirs_H1.py \
 
 ## Corrected experiment sequence
 
-The following commands select structures, train policies and a matched PPO baseline, collect ten deterministic episodes per policy, and test both paper hypotheses. These are full experiment commands; use the small check below first.
+The following commands implement [Solution 1](rebuttal/solution1.md): 20 structures,
+five policy seeds, separate ranking and dynamics episodes, H1 and Fig. 3B inference,
+and the distinct manuscript H2. These are full experiments; use the small check
+below first. Other selection workflows retain the default 100 configurations.
 
 ```sh
 uv run --locked python scripts/select_reservoirs.py \
-  --protocol corrected --run-id selection
+  --protocol corrected --run-id selection-20 \
+  --pool-per-stratum 1000 --select-per-stratum 4 --pca-components 8 --units 200
 
 uv run --locked python scripts/train_all_selected.py \
   --protocol corrected \
-  --selected-csv artifacts/corrected/selection/selection/selected.csv \
-  --run-id training
+  --selected-csv artifacts/corrected/selection-20/selection/selected.csv \
+  --run-id training-20-seeds5
 
 uv run --locked python scripts/collect_obs_context_vec.py \
   --protocol corrected \
-  --selected-csv artifacts/corrected/selection/selection/selected.csv \
-  --models-csv artifacts/corrected/training/models/models.csv \
-  --run-id collection
+  --selected-csv artifacts/corrected/selection-20/selection/selected.csv \
+  --models-csv artifacts/corrected/training-20-seeds5/models/models.csv \
+  --evaluation-seed 10000 --evaluation-episodes 10 --run-id ranking-20-seeds5
+
+uv run --locked python scripts/collect_obs_context_vec.py \
+  --protocol corrected \
+  --selected-csv artifacts/corrected/selection-20/selection/selected.csv \
+  --models-csv artifacts/corrected/training-20-seeds5/models/models.csv \
+  --evaluation-seed 20000 --evaluation-episodes 10 --run-id dynamics-20-seeds5
 
 uv run --locked python scripts/analyze_hypotheses.py \
-  --protocol corrected \
-  --selected-csv artifacts/corrected/selection/selection/selected.csv \
-  --evaluation-csv artifacts/corrected/collection/evaluation/episodes.csv \
-  --trajectories-csv artifacts/corrected/collection/trajectories/trajectories.csv \
-  --run-id hypotheses
+  --protocol corrected --backend dmdc \
+  --selected-csv artifacts/corrected/selection-20/selection/selected.csv \
+  --evaluation-csv artifacts/corrected/ranking-20-seeds5/evaluation/episodes.csv \
+  --trajectories-csv artifacts/corrected/dynamics-20-seeds5/trajectories/trajectories.csv \
+  --run-id hypotheses-solution1-20-seeds5
 ```
 
-Selection uses only eight structural descriptors and stratified MaxMin diversity. Training cannot affect the selection. Paper H1 compares within-top and within-bottom dynamical distances; paper H2 compares descriptor distance with absolute mean-return difference. Tests permute reservoir labels to preserve dependence among pairwise distances. Their new p-values need not match the manuscript's historical values.
+Selection uses only eight structural descriptors and stratified MaxMin diversity.
+Primary H1 correlates each pair's minimum reservoir return with dynamical distance,
+using all 190 pairs. Secondary H1 compares top-five and bottom-five distances with
+all 252 conditional group allocations. Fig. 3B tests structure versus dynamics;
+manuscript H2 separately tests structure versus absolute return difference.
 
-Corrected trajectory analyses fit one DMDc system per reservoir and policy seed.
+Corrected trajectory analyses default to SubspaceDMDc/N4SID; use `--backend dmdc`
+to reproduce the original Solution 1 identification. Both fit one system per reservoir and policy seed.
 Each episode's source/target transitions are built separately before concatenation,
 so episode resets never become fitted transitions. With 20 reservoirs and five
 policy seeds, this fits 100 systems per task and chooses one common rank across
@@ -72,17 +87,120 @@ all 100 before selecting top/bottom groups. Reservoir-pair distances average all
 
 Analysis exports `<task>_policy_distances.npz` and `<task>_policy_order.csv` for
 the individual fitted systems, `<task>_reservoir_distances.npz` for the complete
-aggregated cohort, and the existing `<task>_distances.npz` for the ordered analysis
-groups. Diagnostics record system identities, episode transition counts, rank,
+aggregated cohort. The other dynamics scripts also export `<task>_distances.npz`
+for their ordered analysis groups. Diagnostics record system identities, episode transition counts, rank,
 and aggregation settings. Missing policies, duplicate/incomplete episodes, or
 inconsistent read-in hashes halt analysis. Defaults require policy seeds 0–4 and
-ten episodes each; use `--policy-seeds` and `--dynamics-episodes` for explicitly
-different designs. `--smoke` requires one seed and one episode.
+ten episodes each. Solution 1 requires the complete fixed cohort; other dynamics
+scripts support explicitly different `--policy-seeds` and `--dynamics-episodes`.
+`--smoke` uses one seed and one episode and produces validation results only.
 
-Rerun analysis with a new run ID after updating the code; existing trained models
-and episode files can be reused. Earlier pooled-fit results must be recomputed.
-This fixes fitting and aggregation; it does not supply separate ranking/dynamics
-episodes, matched-seed bootstrap inference, or the other Solution 1 additions.
+The analysis saves `report.html`, all five metric matrices, pair and ranking
+tables, diagnostics, permutation labels, and bootstrap distributions. Figures
+include all-reservoir learning curves, all seed evaluation means, supplementary
+family summaries, continuous H1, fixed-group raw distances, and Euclidean and
+Mahalanobis structure–dynamics plots. Every figure has CSV sources; publication
+figures have PNG and PDF versions. The 5,000 matched seed-block bootstrap draws
+retain repeated labels on both distance axes and use the same draws across tasks.
+Intervals are conditional on the selected structures and collected episodes.
+Primary metrics are `state_joint` and `control_joint`; other metrics are exploratory.
+Unrestricted, within-family, secondary-group, and Mahalanobis tests have separate
+Holm families. Interim adjustments are labelled and final five-task values remain
+blank until all tasks are present.
+
+Reuse trained policies and the existing ranking evaluation at seeds 10000–10009.
+Collect new dynamics episodes at 20000–20009, then refit old pooled or boundary-
+contaminated results. No RL retraining is required for these analysis additions.
+Checkpoint and encoder hashes must match both collections. Imported VM paths
+resolve under the local `artifacts` root without changing registry files.
+
+For the downloaded Hopper/Walker cohort, run these commands on the VM or locally:
+
+```sh
+uv run --locked python scripts/collect_obs_context_vec.py \
+  --protocol corrected \
+  --selected-csv artifacts/corrected/selection-20/selection/selected.csv \
+  --models-csv artifacts/corrected/training-20-seeds5/models/models.csv \
+  --tasks Hopper-v4 Walker2d-v4 --policy-seeds 0 1 2 3 4 \
+  --evaluation-seed 20000 --evaluation-episodes 10 --device cpu \
+  --run-id dynamics-20-seeds5-hopper-walker
+
+uv run --locked python scripts/analyze_hypotheses.py \
+  --protocol corrected --backend dmdc --interim \
+  --selected-csv artifacts/corrected/selection-20/selection/selected.csv \
+  --evaluation-csv artifacts/corrected/collection-20-seeds5-hopper-walker/evaluation/episodes.csv \
+  --trajectories-csv artifacts/corrected/dynamics-20-seeds5-hopper-walker/trajectories/trajectories.csv \
+  --tasks Hopper-v4 Walker2d-v4 --device cpu \
+  --run-id hypotheses-solution1-20-seeds5-hopper-walker
+```
+
+`--interim` permits complete task subsets, never incomplete reservoir/policy
+cohorts. Actual checkpoint settings are audited: the existing Walker cohort has
+44 policies with 10 × 256 rollout samples and 56 with 20 × 256. These policies
+are reused with the deviation disclosed; the report does not label them uniform
+confirmatory training. Saved training settings and regime counts accompany results.
+
+To explore existing ranking trajectories immediately, explicitly add
+`--exploratory-reuse-ranking-episodes` and point `--trajectories-csv` at the old
+collection. Outputs are labelled exploratory. This option does not satisfy the
+separate dynamics-episode requirement. Use an unused run ID for each analysis.
+`--distance-cache artifacts/corrected/<previous-solution1-run>` reuses fitted
+matrices only when payload hashes, system identities, fitting settings, software
+versions and fit source code match. Other statistics and figures are regenerated.
+
+### SubspaceDMDc follow-up
+
+The corrected default is now `--backend n4sid`, using the local DSA package's
+QR-based SubspaceDMDc implementation. No `nfoursid` dependency is required.
+Legacy backend defaults and the historical `dmdc` alias retain their routing.
+N4SID identifies a latent realization; operator distances depend on its
+coordinates and scaling. Changing the software default does not establish a
+new confirmatory protocol: N4SID hypothesis results are labelled exploratory
+and `confirmatory_eligible` is false.
+
+On the machine with the complete original five-task collections, run:
+
+```sh
+uv run --locked python scripts/analyze_hypotheses.py \
+  --protocol corrected --backend n4sid \
+  --selected-csv artifacts/corrected/selection-20/selection/selected.csv \
+  --pool-csv artifacts/corrected/selection-20/selection/descriptors.csv \
+  --models-csv artifacts/corrected/training-20-seeds5/models/models.csv \
+  --evaluation-csv artifacts/corrected/ranking-20-seeds5-alltasks/evaluation/episodes.csv \
+  --trajectories-csv artifacts/corrected/collection-20-seeds5-alltasks/trajectories/trajectories.csv \
+  --tasks Hopper-v4 Walker2d-v4 Swimmer-v4 Ant-v4 HalfCheetah-v4 \
+  --policy-seeds 0 1 2 3 4 --n-delays 3 --rank-energy 0.99 --max-rank 50 \
+  --dmd-regularization 1e-8 --analysis-seed 0 \
+  --permutations 9999 --bootstrap-replicates 5000 --device cpu --workers 1 \
+  --run-id hypotheses-subspace-20-seeds5-alltasks
+```
+
+Reuse selection, trained policies, ranking returns, and valid aligned episode
+payloads. Refit all 100 policy systems per task and regenerate distances, H1,
+Fig. 3B, bootstrap distributions, and figures. Manuscript H2 uses the same
+returns and structural distances and should retain its numerical results.
+The downloaded hypothesis summaries do not contain the missing original
+trajectory payloads: obtain the complete source collections, checkpoint files,
+and logs before running locally. Preserve the Walker2d mixed-training-regime
+deviation; changing the estimator does not resolve it.
+
+Identification runs in float64 (NumPy on CPU, Torch on requested CUDA). The
+common rank still uses 99% delay-embedded **state** energy, capped at 50 and
+common state support, rather than the subspace projection's energy spectrum.
+Every projection must support that chosen rank numerically; unsupported ranks
+fail rather than being lowered silently. `--n-delays 3` gives past/future
+subspace horizons of three. Each episode must provide at least two windows;
+all episodes must contribute, and no transition crosses a reset. Diagnostics
+record projection support/spectra, episode windows/transitions, dtype, operator
+dimensions and conditioning. These numerical checks do not establish held-out
+identification accuracy on the real cohort.
+
+For explicitly changed rank, horizons, regularization, or inference settings,
+use `--exploratory-identification`; this does **not** allow ranking-episode reuse.
+Choose settings using identification validation, never hypothesis p-values.
+No failure changes the estimator or selects the custom subspace algorithm.
+Do not reuse DMDc or old-schema distance caches. Use an unused run ID; to
+reproduce DMDc with these inputs, specify `--backend dmdc` and a separate run ID.
 
 InputDSA controllability scoring uses double precision and scales the SVD
 cross-product to avoid overflow from large powers of fitted dynamics matrices.
@@ -148,7 +266,7 @@ uv run --locked python scripts/collect_obs_context_vec.py \
   --run-id smoke-collection
 
 uv run --locked python scripts/analyze_hypotheses.py \
-  --protocol corrected --smoke --tasks Swimmer-v4 \
+  --protocol corrected --smoke --exploratory-reuse-ranking-episodes --tasks Swimmer-v4 \
   --selected-csv artifacts/corrected/smoke-selection/selection/selected.csv \
   --evaluation-csv artifacts/corrected/smoke-collection/evaluation/episodes.csv \
   --trajectories-csv artifacts/corrected/smoke-collection/trajectories/trajectories.csv \

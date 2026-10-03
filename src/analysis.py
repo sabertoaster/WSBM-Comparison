@@ -44,16 +44,19 @@ def load_dsa():
     return DMDc, InputDSA, SubspaceDMDc
 
 
-def fit_distances(states, inputs, args):
+def fit_distances(states, inputs, args, system_ids=None):
     """Fit five InputDSA matrices, preserving independent trial boundaries.
 
-    Corrected dmdc uses DSA.DMDc. Legacy dmdc preserves the historical string
+    Corrected n4sid and dmdc use explicit episode-preserving adapters.
+    Legacy dmdc preserves the historical string
     alias routed by DSA.SubspaceDMDc to its custom subspace implementation.
     """
     import torch
 
     if len(states) < 2 or len(states) != len(inputs):
         raise ValueError("Need at least two aligned systems")
+    if system_ids is not None and len(system_ids) != len(states):
+        raise ValueError("System identity count differs from fitted systems")
     for xs, us in zip(states, inputs):
         xlist = [xs] if isinstance(xs, np.ndarray) else xs
         ulist = [us] if isinstance(us, np.ndarray) else us
@@ -71,13 +74,15 @@ def fit_distances(states, inputs, args):
         raise ValueError(f"Requested rank {rank} exceeds common support {support}")
     torch.manual_seed(args.analysis_seed)
     DMDc, InputDSA, SubspaceDMDc = load_dsa()
-    from src.dsa_episodes import EpisodeSeparatedDMDc
+    from src.dsa_episodes import EpisodeSeparatedDMDc, EpisodeSeparatedSubspaceDMDc
     from src.dsa_numerics import StableControllabilityDistance
 
     if args.protocol == "corrected" and args.backend == "dmdc":
         klass = DMDc
         config = {"n_delays": args.n_delays, "rank_output": rank, "rank_input": None, "lamb": args.dmd_regularization}
     else:
+        if args.protocol == "corrected" and args.backend != "n4sid":
+            raise ValueError("Corrected identification requires n4sid or dmdc")
         klass = SubspaceDMDc
         config = {"n_delays": args.n_delays, "rank": rank, "backend": args.backend, "lamb": args.dmd_regularization}
     engine = InputDSA(
@@ -91,24 +96,19 @@ def fit_distances(states, inputs, args):
     )
     engine.simdist = StableControllabilityDistance(**engine.simdist_config)
     if args.protocol == "corrected":
-        if args.backend != "dmdc":
-            raise ValueError("Corrected episode-separated dynamics require --backend dmdc")
-        # InputDSA recognizes exact external classes only. Register DMDc through
-        # its public constructor, then supply adapters as its fitted systems.
-        engine.dmds = [
-            [
-                EpisodeSeparatedDMDc(
-                    data=xs,
-                    control_data=us,
-                    n_delays=args.n_delays,
-                    rank_output=rank,
-                    rank_input=None,
-                    lamb=args.dmd_regularization,
-                    device=args.device,
-                )
-                for xs, us in zip(states, inputs)
-            ]
-        ]
+        # InputDSA recognizes exact external classes only. Register the base
+        # class through its constructor, then supply local adapters.
+        adapter = EpisodeSeparatedDMDc if args.backend == "dmdc" else EpisodeSeparatedSubspaceDMDc
+        models = []
+        for i, (xs, us) in enumerate(zip(states, inputs)):
+            identity = str(system_ids[i]) if system_ids is not None else f"system {i}"
+            try:
+                model = adapter(data=xs, control_data=us, device=args.device, **config)
+                model.system_identity = identity
+                models.append(model)
+            except (ValueError, AssertionError) as error:
+                raise ValueError(f"{args.backend} {identity}: {error}") from error
+        engine.dmds = [models]
     joint = engine.fit_score()
     result = {"joint": joint[:, :, 0], "state_joint": joint[:, :, 1], "control_joint": joint[:, :, 2]}
     engine.update_compare_method(
@@ -135,19 +135,31 @@ def fit_distances(states, inputs, args):
                 "state_condition": float(np.linalg.cond(a)),
                 "control_singular_values": np.linalg.svd(b, compute_uv=False).tolist(),
                 "episode_transition_counts": getattr(model, "episode_transition_counts", None),
+                "identification_dtype": str(a.dtype),
+                **getattr(model, "identification_diagnostics", {}),
             }
         )
     for name, matrix in result.items():
         if matrix.shape != (len(states), len(states)) or not np.isfinite(matrix).all():
             raise ValueError(f"Invalid {name} distances; backend={args.backend}; no fallback applied")
+        if args.protocol == "corrected" and (not np.allclose(matrix, matrix.T) or np.any(matrix < -1e-8)):
+            raise ValueError(f"Asymmetric or negative {name} distances; backend={args.backend}")
+    boundaries = args.protocol == "corrected" and all(
+        getattr(model, "episode_boundaries_preserved", False) for model in engine.dmds[0]
+    )
+    if args.protocol == "corrected" and not boundaries:
+        raise ValueError("Corrected identification did not verify episode boundaries")
     return result, {
         "rank": rank,
         "per_system_energy_ranks": ranks,
         "n_delays": args.n_delays,
         "backend": args.backend,
         "dmd_class": klass.__name__,
-        "episode_boundaries_preserved": args.protocol == "corrected",
-        "dmd_adapter": "EpisodeSeparatedDMDc" if args.protocol == "corrected" else None,
+        "episode_boundaries_preserved": boundaries,
+        "dmd_adapter": adapter.__name__ if args.protocol == "corrected" else None,
+        "rank_selection": "explicit" if args.rank is not None else "delay_embedded_state_energy",
+        "rank_energy": args.rank_energy,
+        "identification_dtype": ",".join(sorted({d["identification_dtype"] for d in diagnostics})),
         "controllability_precision": "float64",
         "controllability_alignment": "scaled_cross_product",
         "operators": diagnostics,
@@ -309,8 +321,8 @@ def load_trajectories(args, frame, task, policy_seed=None):
 
 def fit_policy_trajectories(args, frame, task, output):
     """Fit one system per reservoir/policy and average all cross-policy pairs."""
-    if args.protocol != "corrected" or args.backend != "dmdc":
-        raise ValueError("Policy-specific dynamics require corrected DMDc")
+    if args.protocol != "corrected" or args.backend not in ("dmdc", "n4sid"):
+        raise ValueError("Policy-specific dynamics require corrected n4sid or dmdc")
     registry = pd.read_csv(args.trajectories_csv, keep_default_na=False)
     relevant = registry[
         (registry.task == task) & registry.csv_idx.isin(frame.csv_idx) & registry.policy_seed.isin(args.policy_seeds)
@@ -336,11 +348,12 @@ def fit_policy_trajectories(args, frame, task, output):
     if len(complete) < 2:
         raise ValueError("Need at least two reservoirs with all requested policy replicates")
     xs, us = [xs[i] for i in positions], [us[i] for i in positions]
-    matrices, diagnostics = fit_distances(xs, us, args)
+    identities = [f"task={task}, csv_idx={r.csv_idx}, policy_seed={r.policy_seed}" for r in systems.itertuples()]
+    matrices, diagnostics = fit_distances(xs, us, args, system_ids=identities)
     cohort = frame[frame.csv_idx.isin(complete)].copy()
     aggregated = aggregate_policy_distances(matrices, systems, cohort.csv_idx, args.policy_seeds)
     diagnostics.update(
-        dynamics_schema_version=2,
+        dynamics_schema_version=3,
         aggregation="mean_all_cross_policy_pairs",
         policy_seeds=args.policy_seeds,
         fitted_system_count=len(systems),
@@ -355,6 +368,8 @@ def fit_policy_trajectories(args, frame, task, output):
         rank=diagnostics["rank"],
         n_delays=args.n_delays,
         protocol=args.protocol,
+        backend=args.backend,
+        dynamics_schema_version=3,
     )
     np.savez_compressed(
         output / "analysis" / f"{task}_policy_distances.npz",
@@ -364,6 +379,8 @@ def fit_policy_trajectories(args, frame, task, output):
         rank=diagnostics["rank"],
         n_delays=args.n_delays,
         protocol=args.protocol,
+        backend=args.backend,
+        dynamics_schema_version=3,
     )
     systems.to_csv(output / "analysis" / f"{task}_policy_order.csv", index=False)
     return cohort, aggregated, diagnostics, exclusions

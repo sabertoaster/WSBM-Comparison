@@ -104,7 +104,7 @@ def validate_design(args, frame):
         if args.group_size != 5 or args.ranking_source != "evaluation":
             raise ValueError("Solution 1 uses fixed top/bottom five and deterministic ranking episodes")
         settings = (
-            args.backend == "dmdc"
+            args.backend in ("dmdc", "n4sid")
             and args.n_delays == 3
             and args.rank is None
             and args.rank_energy == 0.99
@@ -116,7 +116,7 @@ def validate_design(args, frame):
             and args.permutations == 9999
             and args.bootstrap_replicates == 5000
         )
-        if not settings and not args.exploratory_reuse_ranking_episodes:
+        if not settings and not (args.exploratory_reuse_ranking_episodes or args.exploratory_identification):
             raise ValueError("Changed Solution 1 identification/inference settings require explicit exploratory mode")
         selection_manifest = json.loads((Path(args.selected_csv).parent.parent / "manifest.json").read_text())
         settings = selection_manifest["arguments"]
@@ -333,6 +333,10 @@ def validate_sources(args, frame, output):
     regimes = audit.groupby(["task", *settings], as_index=False).size().to_dict("records")
     mixed_tasks = audit.groupby("task").apply(lambda x: len(x[settings].drop_duplicates()), include_groups=False)
     deviations = []
+    if args.backend == "n4sid":
+        deviations.append("SubspaceDMDc/N4SID follow-up departs from the original Solution 1 DMDc protocol")
+    if args.exploratory_identification:
+        deviations.append("Explicit exploratory identification/inference settings")
     if mixed_tasks.gt(1).any():
         deviations.append("Training settings differ within tasks: " + ", ".join(mixed_tasks[mixed_tasks.gt(1)].index))
     if args.smoke:
@@ -345,6 +349,7 @@ def validate_sources(args, frame, output):
     pd.DataFrame(payload_audit).to_csv(output / "analysis" / "trajectory_audit.csv", index=False)
     write_json(output / "analysis" / "model_settings.json", configurations)
     provenance = dict(
+        identification_variant="subspace_n4sid" if args.backend == "n4sid" else "solution1_dmdc",
         source_hashes=source_hashes,
         training_regimes=regimes,
         training_run_history=training_history,
@@ -387,8 +392,13 @@ def cached_distances(args, frame, task, output, dynamics):
     sources = [ROOT / "src" / p for p in ("analysis.py", "utils.py", "dsa_episodes.py", "dsa_numerics.py")]
     sources.extend(sorted((ROOT / "DSA" / "DSA").rglob("*.py")))
     identity = dict(
-        schema=3,
+        schema=4,
         settings=settings,
+        identification=dict(
+            adapter="EpisodeSeparatedSubspaceDMDc" if args.backend == "n4sid" else "EpisodeSeparatedDMDc",
+            dtype="float64" if args.backend == "n4sid" else "backend_native",
+            rank_selection="explicit" if args.rank is not None else "delay_embedded_state_energy",
+        ),
         selection_sha256=file_hash(args.selected_csv),
         reservoir_ids=frame.csv_idx.tolist(),
         payloads=payloads,
@@ -434,6 +444,8 @@ def cached_distances(args, frame, task, output, dynamics):
             raise ValueError("Cache system ordering mismatch")
     if (
         not diagnostics["episode_boundaries_preserved"]
+        or diagnostics.get("dynamics_schema_version") != 3
+        or diagnostics.get("backend") != args.backend
         or diagnostics["fitted_system_count"] != len(frame) * len(args.policy_seeds)
         or diagnostics["system_order"] != order[["csv_idx", "policy_seed", "episode_count"]].to_dict("records")
     ):

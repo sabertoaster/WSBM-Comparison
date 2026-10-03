@@ -233,7 +233,10 @@ def render_report(output, tables, provenance):
         "Intervals exclude reservoir-population, episode-sampling and identification uncertainty.</p>",
         "<p>Holm families are separate for continuous H1, exact secondary H1, Euclidean Fig. 3B, "
         "within-family sensitivity and Mahalanobis sensitivity. Other dynamics metrics remain exploratory. "
-        "Interim corrections cover available tasks only; final five-task adjusted values remain blank.</p>",
+        "Interim runs leave final five-task adjusted values blank; complete five-task runs report final corrections.</p>",
+        "<p>Identification variant: " + html.escape(provenance["identification_variant"]) + ". "
+        "N4SID identifies a latent realization; operator distances depend on its coordinates and scaling. "
+        "A software default change does not make this follow-up prespecified.</p>",
     ]
     for deviation in provenance["deviations"]:
         content.append("<p><strong>Protocol deviation: " + html.escape(deviation) + "</strong></p>")
@@ -321,7 +324,8 @@ def run_solution1(args, frame, output):
     render_report(output, tables, provenance)
     write_json(output / "analysis" / "protocol_status.json", provenance)
     return dict(
-        solution1_schema=3,
+        solution1_schema=4,
+        identification_variant=provenance["identification_variant"],
         task_count=len(args.tasks),
         reservoir_count=len(frame),
         policy_systems_per_task=len(frame) * len(args.policy_seeds),
